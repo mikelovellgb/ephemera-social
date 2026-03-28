@@ -1,0 +1,39 @@
+[package]
+name = "ephemera-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+ephemera-protocol = { path = "../crates/ephemera-protocol" }
+ephemera-post = { path = "../crates/ephemera-post" }
+ephemera-media = { path = "../crates/ephemera-media" }
+ephemera-social = { path = "../crates/ephemera-social" }
+ephemera-types = { path = "../crates/ephemera-types" }
+ephemera-crypto = { path = "../crates/ephemera-crypto" }
+bytes = "1"
+serde_json = "1"
+
+[[bin]]
+name = "fuzz_protocol_decode"
+path = "fuzz_targets/fuzz_protocol_decode.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_post_validation"
+path = "fuzz_targets/fuzz_post_validation.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_media_validation"
+path = "fuzz_targets/fuzz_media_validation.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_handle_format"
+path = "fuzz_targets/fuzz_handle_format.rs"
+doc = false

@@ -1,0 +1,268 @@
+/* ============================================================
+   Ephemera — Mobile-specific styles
+   Touch-optimised UI, safe areas, responsive refinements
+   ============================================================ */
+
+@media (max-width: 768px) {
+
+    body {
+        -webkit-text-size-adjust: 100%;
+        overscroll-behavior-y: contain;
+    }
+
+    #app {
+        padding-top: var(--safe-area-top);
+    }
+
+    .main-content {
+        padding: var(--sp-3) var(--sp-3);
+        padding-bottom: calc(var(--nav-height) + var(--safe-area-bottom) + var(--sp-6));
+    }
+
+    /* --- Navigation bar --- */
+
+    .nav-bar {
+        padding-bottom: var(--safe-area-bottom);
+        height: calc(var(--nav-height) + var(--safe-area-bottom));
+        padding-left: env(safe-area-inset-left, 0px);
+        padding-right: env(safe-area-inset-right, 0px);
+    }
+
+    .nav-item {
+        min-width: 44px;
+        min-height: 44px;
+        padding: var(--sp-2) var(--sp-2);
+        font-size: 10px;
+    }
+
+    .nav-item svg {
+        width: 22px;
+        height: 22px;
+    }
+
+    .nav-compose-btn {
+        width: 44px;
+        height: 44px;
+        top: -6px;
+    }
+
+    /* --- Touch-friendly buttons --- */
+
+    .btn {
+        min-height: 44px;
+        touch-action: manipulation;
+    }
+
+    .btn-sm {
+        min-height: 36px;
+    }
+
+    /* --- Form inputs (16px prevents iOS auto-zoom) --- */
+
+    .input-field {
+        min-height: 44px;
+        font-size: 16px;
+    }
+
+    /* --- Post cards --- */
+
+    .post-card {
+        padding: var(--sp-4);
+        margin-bottom: var(--sp-2);
+    }
+
+    .post-action-btn {
+        min-width: 44px;
+        min-height: 44px;
+    }
+
+    /* --- Compose view --- */
+
+    .compose-container {
+        transition: padding-bottom 0.2s ease;
+    }
+
+    /* --- Connections --- */
+
+    .connection-card {
+        padding: var(--sp-3);
+    }
+
+    .connection-actions {
+        gap: var(--sp-2);
+    }
+
+    .connection-actions .btn {
+        flex: 1;
+        min-height: 40px;
+    }
+
+    /* --- Messages --- */
+
+    .chat-messages {
+        -webkit-overflow-scrolling: touch;
+    }
+
+    .chat-compose {
+        padding-bottom: var(--safe-area-bottom);
+    }
+
+    .message-bubble {
+        max-width: 85%;
+    }
+
+    /* --- Onboarding --- */
+
+    .onboarding {
+        padding: var(--sp-6) var(--sp-4);
+        min-height: calc(100vh - var(--safe-area-top));
+        min-height: calc(100dvh - var(--safe-area-top));
+    }
+
+    .onboarding-logo {
+        font-size: var(--fs-xl);
+    }
+
+    .onboarding-tagline {
+        font-size: var(--fs-sm);
+        margin-bottom: var(--sp-8);
+    }
+
+    .onboarding-step {
+        max-width: 100%;
+    }
+
+    .word-grid {
+        grid-template-columns: repeat(3, 1fr);
+        gap: var(--sp-1);
+    }
+
+    /* --- Profile --- */
+
+    .profile-header {
+        padding: var(--sp-4) 0;
+    }
+
+    .privacy-tier-selector {
+        flex-direction: column;
+    }
+
+    /* --- Modal --- */
+
+    .modal-overlay {
+        padding: var(--sp-3);
+        padding-top: calc(var(--sp-3) + var(--safe-area-top));
+        align-items: flex-end;
+    }
+
+    .modal-content {
+        max-height: calc(100vh - 80px - var(--safe-area-top) - var(--safe-area-bottom));
+        max-height: calc(100dvh - 80px - var(--safe-area-top) - var(--safe-area-bottom));
+        border-radius: var(--radius-xl) var(--radius-xl) 0 0;
+    }
+
+    /* --- Toast --- */
+
+    .toast-container {
+        top: auto;
+        bottom: calc(var(--nav-height) + var(--safe-area-bottom) + var(--sp-2));
+        left: var(--sp-3);
+        right: var(--sp-3);
+        transform: none;
+        max-width: none;
+        width: auto;
+    }
+
+    /* --- Feed header sticky --- */
+
+    .feed-header {
+        margin: 0 calc(-1 * var(--sp-3));
+        padding-left: var(--sp-3);
+        padding-right: var(--sp-3);
+    }
+}
+
+/* ============================================================
+   Small phones (max-width: 375px)
+   ============================================================ */
+
+@media (max-width: 375px) {
+    :root {
+        --nav-height: 56px;
+    }
+
+    .main-content {
+        padding: var(--sp-2) var(--sp-2);
+    }
+
+    .nav-item svg {
+        width: 20px;
+        height: 20px;
+    }
+
+    .nav-compose-btn {
+        width: 40px;
+        height: 40px;
+    }
+
+    .onboarding-logo {
+        font-size: var(--fs-lg);
+    }
+
+    .post-card {
+        padding: var(--sp-3);
+    }
+
+    .word-grid {
+        grid-template-columns: repeat(2, 1fr);
+    }
+}
+
+/* ============================================================
+   Landscape orientation on mobile
+   ============================================================ */
+
+@media (max-width: 768px) and (orientation: landscape) {
+    .nav-bar {
+        height: calc(48px + var(--safe-area-bottom));
+    }
+
+    .nav-item {
+        flex-direction: row;
+        gap: var(--sp-1);
+        font-size: var(--fs-xs);
+    }
+
+    .nav-item svg {
+        width: 20px;
+        height: 20px;
+    }
+
+    .nav-compose-btn {
+        top: -4px;
+        width: 40px;
+        height: 40px;
+    }
+
+    .main-content {
+        padding-bottom: calc(48px + var(--safe-area-bottom) + var(--sp-4));
+    }
+
+    .onboarding {
+        min-height: auto;
+        padding: var(--sp-4);
+    }
+}
+
+/* ============================================================
+   Reduced motion
+   ============================================================ */
+
+@media (prefers-reduced-motion: reduce) {
+    * {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+        scroll-behavior: auto !important;
+    }
+}

@@ -1,0 +1,27 @@
+[package]
+name = "ephemera-social"
+description = "Social graph and feed assembly for Ephemera"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ephemera-types = { workspace = true }
+ephemera-crypto = { workspace = true }
+ephemera-store = { workspace = true }
+ephemera-post = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+rand = { workspace = true }
+hex = { workspace = true }
+blake3 = { workspace = true }
+rusqlite = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

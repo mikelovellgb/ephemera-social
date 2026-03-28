@@ -1,0 +1,16 @@
+[package]
+name = "ephemera-mod"
+description = "Community moderation subsystem for the Ephemera platform"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ephemera-types = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+blake3 = { workspace = true }
+hex = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,223 @@
+// Ephemera wire protocol message definitions.
+//
+// These protobuf messages define the on-the-wire format for peer-to-peer
+// communication in the Ephemera network. Compiled to Rust via prost-build
+// in the ephemera-protocol crate's build.rs.
+
+syntax = "proto3";
+
+package ephemera;
+
+// -------------------------------------------------------------------------
+// Envelope: top-level wire message wrapping all protocol messages.
+// -------------------------------------------------------------------------
+
+message Envelope {
+  // Protocol version (currently 1).
+  uint32 version = 1;
+
+  // The message payload.
+  oneof payload {
+    PostMessage       post        = 10;
+    Tombstone         tombstone   = 11;
+    ConnectionRequest connection  = 12;
+    DirectMessage     dm          = 13;
+    PrekeyBundle      prekeys     = 14;
+    ChunkRequest      chunk_req   = 15;
+    ChunkResponse     chunk_resp  = 16;
+    PeerExchange      peer_ex     = 17;
+    CapabilityHandshake handshake = 18;
+  }
+}
+
+// -------------------------------------------------------------------------
+// Content messages
+// -------------------------------------------------------------------------
+
+// A signed post published to the gossip overlay.
+message PostMessage {
+  // 33-byte content hash (version + BLAKE3 digest).
+  bytes content_hash = 1;
+
+  // Ed25519 public key of the author pseudonym.
+  bytes author_pubkey = 2;
+
+  // Ed25519 signature over the canonical content bytes.
+  bytes signature = 3;
+
+  // HLC timestamp (packed u64).
+  uint64 created_at = 4;
+
+  // TTL in seconds.
+  uint32 ttl_seconds = 5;
+
+  // Encrypted content blob (XChaCha20-Poly1305).
+  bytes ciphertext = 6;
+
+  // Proof-of-work stamp (Equihash solution).
+  bytes pow_stamp = 7;
+
+  // Content kind tag for routing (text, photo, reply, etc.).
+  string content_kind = 8;
+
+  // Audience visibility.
+  string audience = 9;
+
+  // Parent content hash, if this is a reply.
+  bytes parent_hash = 10;
+
+  // Sequence number within the author's feed.
+  uint64 sequence_number = 11;
+}
+
+// A deletion tombstone for expired or author-deleted content.
+message Tombstone {
+  // Content hash of the deleted content.
+  bytes content_hash = 1;
+
+  // Ed25519 public key of the author (only the author can tombstone).
+  bytes author_pubkey = 2;
+
+  // Ed25519 signature over (content_hash || "tombstone").
+  bytes signature = 3;
+
+  // When the tombstone was created.
+  uint64 created_at = 4;
+}
+
+// -------------------------------------------------------------------------
+// Social graph messages
+// -------------------------------------------------------------------------
+
+// A connection request between two pseudonyms.
+message ConnectionRequest {
+  // Requester's Ed25519 public key.
+  bytes from_pubkey = 1;
+
+  // Target's Ed25519 public key.
+  bytes to_pubkey = 2;
+
+  // Optional greeting message (plaintext, max 280 chars).
+  string message = 3;
+
+  // Signature over (from_pubkey || to_pubkey || message).
+  bytes signature = 4;
+
+  // When the request was created.
+  uint64 created_at = 5;
+}
+
+// -------------------------------------------------------------------------
+// Messaging (encrypted DMs)
+// -------------------------------------------------------------------------
+
+// An encrypted direct message using the Double Ratchet protocol.
+message DirectMessage {
+  // Dead drop address (derived from both parties' keys).
+  bytes dead_drop_id = 1;
+
+  // Ratchet public key for this message.
+  bytes ratchet_pubkey = 2;
+
+  // Message number within the current ratchet chain.
+  uint32 chain_index = 3;
+
+  // Previous chain length (for out-of-order delivery).
+  uint32 previous_chain_length = 4;
+
+  // Encrypted payload (includes sender identity inside).
+  bytes ciphertext = 5;
+
+  // When the message was created.
+  uint64 created_at = 6;
+
+  // TTL in seconds.
+  uint32 ttl_seconds = 7;
+}
+
+// A prekey bundle published to the DHT for initial key exchange (X3DH).
+message PrekeyBundle {
+  // Identity key (long-term Ed25519 public key).
+  bytes identity_key = 1;
+
+  // Signed prekey (medium-term X25519 public key).
+  bytes signed_prekey = 2;
+
+  // Signature over the signed prekey (by identity key).
+  bytes signed_prekey_signature = 3;
+
+  // One-time prekeys (X25519 public keys, consumed on use).
+  repeated bytes one_time_prekeys = 4;
+
+  // When this bundle was published.
+  uint64 created_at = 5;
+}
+
+// -------------------------------------------------------------------------
+// Media transfer
+// -------------------------------------------------------------------------
+
+// Request a chunk of a media attachment from a peer.
+message ChunkRequest {
+  // Content hash of the parent post.
+  bytes content_hash = 1;
+
+  // Index of the requested chunk (0-based).
+  uint32 chunk_index = 2;
+}
+
+// Response containing a media chunk.
+message ChunkResponse {
+  // Content hash of the parent post.
+  bytes content_hash = 1;
+
+  // Index of this chunk.
+  uint32 chunk_index = 2;
+
+  // Total number of chunks for this media item.
+  uint32 total_chunks = 3;
+
+  // The chunk data (up to 256 KiB).
+  bytes data = 4;
+
+  // BLAKE3 hash of this chunk's data for verification.
+  bytes chunk_hash = 5;
+}
+
+// -------------------------------------------------------------------------
+// Peer discovery
+// -------------------------------------------------------------------------
+
+// Peer exchange message for gossip-based peer discovery.
+message PeerExchange {
+  // List of known peers.
+  repeated PeerInfo peers = 1;
+}
+
+// Information about a single peer.
+message PeerInfo {
+  // The peer's node ID (Ed25519 public key).
+  bytes node_id = 1;
+
+  // Known socket addresses for this peer.
+  repeated string addresses = 2;
+
+  // When this peer information was last verified.
+  uint64 last_seen = 3;
+}
+
+// -------------------------------------------------------------------------
+// Protocol negotiation
+// -------------------------------------------------------------------------
+
+// Capability handshake exchanged when two peers connect.
+message CapabilityHandshake {
+  // Protocol version supported by this peer.
+  uint32 protocol_version = 1;
+
+  // List of supported features/extensions.
+  repeated string capabilities = 2;
+
+  // User agent string.
+  string user_agent = 3;
+}

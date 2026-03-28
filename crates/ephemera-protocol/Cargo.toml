@@ -1,0 +1,16 @@
+[package]
+name = "ephemera-protocol"
+description = "Wire protocol definitions for the Ephemera P2P network"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ephemera-types = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+bytes = { workspace = true }
+
+[lints]
+workspace = true

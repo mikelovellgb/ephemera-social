@@ -1,0 +1,88 @@
+[package]
+name = "ephemera-node"
+description = "Composition root for the Ephemera decentralized social platform"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["iroh-transport"]
+iroh-transport = [
+    "ephemera-transport/iroh-transport",
+    "ephemera-gossip/iroh-transport",
+]
+
+[dependencies]
+ephemera-types = { workspace = true }
+ephemera-crypto = { workspace = true }
+ephemera-config = { workspace = true }
+ephemera-events = { workspace = true }
+ephemera-store = { workspace = true }
+ephemera-media = { workspace = true }
+ephemera-post = { workspace = true }
+ephemera-social = { workspace = true }
+ephemera-message = { workspace = true }
+ephemera-abuse = { workspace = true }
+ephemera-mod = { workspace = true }
+ephemera-transport = { workspace = true, default-features = false }
+ephemera-gossip = { workspace = true, default-features = false }
+ephemera-dht = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+blake3 = { workspace = true }
+hex = { workspace = true }
+subtle = { workspace = true }
+rand = { workspace = true }
+zeroize = { workspace = true }
+rusqlite = { workspace = true }
+qrcode = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+image = { workspace = true }
+serde_json = { workspace = true }
+ephemera-social = { workspace = true }
+
+[[test]]
+name = "core_loop"
+path = "tests/core_loop.rs"
+
+[[test]]
+name = "gossip_pipeline"
+path = "tests/gossip_pipeline.rs"
+
+[[test]]
+name = "media_pipeline"
+path = "tests/media_pipeline.rs"
+
+[[test]]
+name = "abuse_enforcement"
+path = "tests/abuse_enforcement.rs"
+
+[[test]]
+name = "node_lifecycle"
+path = "tests/node_lifecycle.rs"
+
+[[test]]
+name = "network_rpc"
+path = "tests/network_rpc.rs"
+
+[[test]]
+name = "dht_wiring"
+path = "tests/dht_wiring.rs"
+
+[[test]]
+name = "message_delivery"
+path = "tests/message_delivery.rs"
+
+[[test]]
+name = "multi_node"
+path = "../../tests/integration/multi_node.rs"
+
+[lints]
+workspace = true

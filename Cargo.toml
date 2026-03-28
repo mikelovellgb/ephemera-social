@@ -1,0 +1,133 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/ephemera-types",
+    "crates/ephemera-crypto",
+    "crates/ephemera-config",
+    "crates/ephemera-events",
+    "crates/ephemera-store",
+    "crates/ephemera-crdt",
+    "crates/ephemera-post",
+    "crates/ephemera-social",
+    "crates/ephemera-media",
+    "crates/ephemera-protocol",
+    "crates/ephemera-transport",
+    "crates/ephemera-gossip",
+    "crates/ephemera-dht",
+    "crates/ephemera-message",
+    "crates/ephemera-abuse",
+    "crates/ephemera-mod",
+    "crates/ephemera-node",
+    "crates/ephemera-client",
+    "crates/ephemera-client/src-tauri",
+    "crates/ephemera-cli",
+    "crates/ephemera-test-utils",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+description = "Decentralized, anonymous, ephemeral social media -- all content expires after 30 days"
+authors = ["Ephemera Contributors"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/ephemera-social/ephemera"
+keywords = ["decentralized", "social-media", "ephemeral", "anonymous", "p2p"]
+categories = ["network-programming", "cryptography"]
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Cryptography
+ed25519-dalek = { version = "2", features = ["batch", "serde"] }
+x25519-dalek = { version = "2", features = ["serde", "static_secrets"] }
+chacha20poly1305 = { version = "0.10" }
+blake3 = { version = "1" }
+argon2 = { version = "0.5" }
+hkdf = { version = "0.12" }
+sha2 = { version = "0.10" }
+zeroize = { version = "1", features = ["derive"] }
+subtle = { version = "2" }
+rand = { version = "0.8" }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1" }
+hex = { version = "0.4" }
+
+# Time
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+
+# Application
+toml = { version = "0.8" }
+thiserror = { version = "2" }
+dirs = { version = "5" }
+
+# Storage
+rusqlite = { version = "0.31", features = ["bundled", "backup"] }
+
+# Image processing
+image = { version = "0.25" }
+
+# QR code generation
+qrcode = { version = "0.14" }
+
+# Video / MP4 processing
+mp4 = { version = "0.14" }
+
+# Logging
+tracing = { version = "0.1" }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Utilities
+async-trait = { version = "0.1" }
+bytes = { version = "1" }
+
+# CLI
+clap = { version = "4", features = ["derive", "env"] }
+
+# P2P transport (Iroh)
+iroh = { version = "0.97" }
+iroh-gossip = { version = "0.97" }
+
+# Testing
+tempfile = { version = "3" }
+proptest = { version = "1" }
+
+# Internal crates
+ephemera-types = { path = "crates/ephemera-types" }
+ephemera-crypto = { path = "crates/ephemera-crypto" }
+ephemera-config = { path = "crates/ephemera-config" }
+ephemera-events = { path = "crates/ephemera-events" }
+ephemera-store = { path = "crates/ephemera-store" }
+ephemera-crdt = { path = "crates/ephemera-crdt" }
+ephemera-post = { path = "crates/ephemera-post" }
+ephemera-social = { path = "crates/ephemera-social" }
+ephemera-media = { path = "crates/ephemera-media" }
+ephemera-protocol = { path = "crates/ephemera-protocol" }
+ephemera-transport = { path = "crates/ephemera-transport", default-features = false }
+ephemera-gossip = { path = "crates/ephemera-gossip", default-features = false }
+ephemera-dht = { path = "crates/ephemera-dht" }
+ephemera-message = { path = "crates/ephemera-message" }
+ephemera-abuse = { path = "crates/ephemera-abuse" }
+ephemera-mod = { path = "crates/ephemera-mod" }
+ephemera-node = { path = "crates/ephemera-node" }
+ephemera-client = { path = "crates/ephemera-client" }
+ephemera-cli = { path = "crates/ephemera-cli" }
+ephemera-test-utils = { path = "crates/ephemera-test-utils" }
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+all = "warn"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+opt-level = 3
+
+[profile.dev]
+opt-level = 1

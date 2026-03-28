@@ -1,0 +1,34 @@
+[package]
+name = "ephemera-tauri"
+version = "0.1.0"
+edition = "2021"
+description = "Tauri 2.x shell for the Ephemera desktop + mobile client"
+
+[lib]
+name = "ephemera_tauri_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "ephemera-tauri"
+path = "src/main.rs"
+
+[dependencies]
+tauri = { version = "2.10", features = [] }
+ephemera-node = { path = "../../ephemera-node" }
+ephemera-config = { path = "../../ephemera-config" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[build-dependencies]
+tauri-build = { version = "2.5", features = [] }
+
+[features]
+# Tauri features — `custom-protocol` serves the frontend from the bundle in
+# production builds instead of a dev server.
+custom-protocol = ["tauri/custom-protocol"]
+
+[lints.rust]
+unsafe_code = "deny"

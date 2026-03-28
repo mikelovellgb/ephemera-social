@@ -1,0 +1,13 @@
+/target
+**/*.rs.bk
+Cargo.lock
+*.pdb
+.env
+*.log
+/tmp
+
+# Project management (not for public repo)
+CLAUDE.md
+/docs/brainstorm/
+/tasks/
+/screenshot_android.png

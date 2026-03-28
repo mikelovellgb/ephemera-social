@@ -1,0 +1,19 @@
+[package]
+name = "ephemera-media"
+description = "Media processing pipeline for Ephemera"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ephemera-types = { workspace = true }
+image = { workspace = true }
+blake3 = { workspace = true }
+thiserror = { workspace = true }
+mp4 = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

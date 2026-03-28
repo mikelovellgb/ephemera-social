@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="theme-color" content="#0a0a0f">
+    <meta name="color-scheme" content="dark">
+    <title>Ephemera</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="stylesheet" href="/src/styles.css">
+    <link rel="stylesheet" href="/src/mobile.css">
+</head>
+<body>
+    <div id="app">
+        <nav id="nav-bar" class="nav-bar hidden" role="navigation" aria-label="Main navigation">
+            <a href="#/feed" class="nav-item" data-route="feed" aria-label="Home">
+                <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                    <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
+                    <polyline points="9 22 9 12 15 12 15 22"/>
+                </svg>
+                <span>Home</span>
+            </a>
+            <a href="#/discover" class="nav-item" data-route="discover" aria-label="Discover">
+                <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                    <circle cx="11" cy="11" r="8"/>
+                    <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+                </svg>
+                <span>Discover</span>
+            </a>
+            <button id="nav-compose-btn" class="nav-compose-btn" aria-label="Create new post">
+                <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true">
+                    <line x1="12" y1="5" x2="12" y2="19"/>
+                    <line x1="5" y1="12" x2="19" y2="12"/>
+                </svg>
+            </button>
+            <a href="#/groups" class="nav-item" data-route="groups" aria-label="Groups">
+                <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                    <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
+                    <circle cx="9" cy="7" r="4"/>
+                    <path d="M23 21v-2a4 4 0 0 0-3-3.87"/>
+                    <path d="M16 3.13a4 4 0 0 1 0 7.75"/>
+                </svg>
+                <span>Groups</span>
+            </a>
+            <a href="#/messages" class="nav-item" data-route="messages" aria-label="Messages">
+                <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                    <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+                </svg>
+                <span>Messages</span>
+            </a>
+            <a href="#/profile" class="nav-item" data-route="profile" aria-label="Profile">
+                <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                    <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
+                    <circle cx="12" cy="7" r="4"/>
+                </svg>
+                <span>Profile</span>
+            </a>
+        </nav>
+        <main id="main-content" class="main-content" role="main" aria-live="polite">
+            <!-- Views are rendered here by the router -->
+        </main>
+    </div>
+
+    <script src="/src/app.js"></script>
+    <script src="/src/qr-scanner.js"></script>
+    <script src="/src/views/unlock.js"></script>
+    <script src="/src/views/onboarding.js"></script>
+    <script src="/src/views/feed.js"></script>
+    <script src="/src/views/compose.js"></script>
+    <script src="/src/views/discover.js"></script>
+    <script src="/src/views/groups.js"></script>
+    <script src="/src/views/messages.js"></script>
+    <script src="/src/views/profile.js"></script>
+    <script>
+        // Boot the application
+        Ephemera.init();
+    </script>
+</body>
+</html>

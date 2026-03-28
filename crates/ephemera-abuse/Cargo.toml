@@ -1,0 +1,18 @@
+[package]
+name = "ephemera-abuse"
+description = "Anti-abuse subsystem: PoW, rate limiting, reputation, spam detection"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ephemera-types = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+blake3 = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "time"] }
+
+[lints]
+workspace = true

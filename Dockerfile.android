@@ -1,0 +1,110 @@
+# =============================================================================
+# Ephemera Android APK Builder
+#
+# Builds the Ephemera Android APK in a reproducible Docker environment.
+# No local Android SDK, NDK, or JDK required.
+#
+# Usage:
+#   docker build -f Dockerfile.android -t ephemera-android-builder .
+#   docker run --rm -v "$(pwd)/output:/output" ephemera-android-builder
+#
+# The APK will be copied to ./output/ on the host.
+# =============================================================================
+
+FROM rust:1.80-bookworm AS builder
+
+# Avoid interactive prompts during package installation
+ENV DEBIAN_FRONTEND=noninteractive
+
+# ---------------------------------------------------------------------------
+# System dependencies
+# ---------------------------------------------------------------------------
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    wget \
+    unzip \
+    openjdk-17-jdk-headless \
+    pkg-config \
+    libssl-dev \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# ---------------------------------------------------------------------------
+# Android SDK + NDK
+# ---------------------------------------------------------------------------
+ENV ANDROID_HOME=/opt/android-sdk
+ENV ANDROID_SDK_ROOT=$ANDROID_HOME
+ENV ANDROID_NDK_VERSION=27.1.12297006
+ENV ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$ANDROID_NDK_VERSION
+ENV NDK_HOME=$ANDROID_NDK_HOME
+ENV JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+
+# Download Android command-line tools
+RUN mkdir -p "$ANDROID_HOME/cmdline-tools" && \
+    cd /tmp && \
+    wget -q "https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip" -O cmdline-tools.zip && \
+    unzip -q cmdline-tools.zip && \
+    mv cmdline-tools "$ANDROID_HOME/cmdline-tools/latest" && \
+    rm cmdline-tools.zip
+
+# Accept licenses and install SDK components
+RUN yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
+RUN "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+    "platform-tools" \
+    "platforms;android-34" \
+    "build-tools;34.0.0" \
+    "ndk;${ANDROID_NDK_VERSION}"
+
+# ---------------------------------------------------------------------------
+# Rust Android targets
+# ---------------------------------------------------------------------------
+RUN rustup target add \
+    aarch64-linux-android \
+    armv7-linux-androideabi \
+    x86_64-linux-android \
+    i686-linux-android
+
+# ---------------------------------------------------------------------------
+# Tauri CLI
+# ---------------------------------------------------------------------------
+RUN cargo install tauri-cli@^2
+
+# ---------------------------------------------------------------------------
+# Cargo config for NDK cross-compilation
+# ---------------------------------------------------------------------------
+ENV NDK_TOOLCHAIN=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64
+ENV API_LEVEL=26
+
+RUN mkdir -p /root/.cargo && cat > /root/.cargo/config.toml <<'TOML'
+[target.aarch64-linux-android]
+linker = "/opt/android-sdk/ndk/27.1.12297006/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang"
+
+[target.armv7-linux-androideabi]
+linker = "/opt/android-sdk/ndk/27.1.12297006/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi26-clang"
+
+[target.x86_64-linux-android]
+linker = "/opt/android-sdk/ndk/27.1.12297006/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android26-clang"
+
+[target.i686-linux-android]
+linker = "/opt/android-sdk/ndk/27.1.12297006/toolchains/llvm/prebuilt/linux-x86_64/bin/i686-linux-android26-clang"
+TOML
+
+# ---------------------------------------------------------------------------
+# Copy source and build
+# ---------------------------------------------------------------------------
+WORKDIR /build
+COPY . .
+
+# Initialize Tauri Android project and build
+RUN cd crates/ephemera-client/src-tauri && \
+    cargo tauri android init && \
+    cargo tauri android build
+
+# ---------------------------------------------------------------------------
+# Output stage: copy APK to a clean image
+# ---------------------------------------------------------------------------
+FROM debian:bookworm-slim AS output
+
+COPY --from=builder /build/crates/ephemera-client/src-tauri/gen/android/app/build/outputs/apk/ /apk/
+
+# Default command: copy APK to /output volume
+CMD ["sh", "-c", "cp -r /apk/* /output/ 2>/dev/null && echo 'APK copied to /output/' && ls -la /output/"]

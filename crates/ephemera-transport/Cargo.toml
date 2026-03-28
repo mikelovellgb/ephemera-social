@@ -1,0 +1,30 @@
+[package]
+name = "ephemera-transport"
+description = "QUIC transport layer for the Ephemera P2P network"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["iroh-transport"]
+iroh-transport = ["dep:iroh"]
+tcp-only = []
+
+[dependencies]
+ephemera-types = { workspace = true }
+ephemera-protocol = { path = "../ephemera-protocol" }
+tokio = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+async-trait = { workspace = true }
+bytes = "1"
+
+# Optional: Iroh QUIC transport
+iroh = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros"] }
+
+[lints]
+workspace = true
