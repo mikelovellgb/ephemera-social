@@ -192,6 +192,59 @@ impl ServiceContainer {
         }
     }
 
+    /// Attempt to upgrade the network transport from TCP to Iroh after the
+    /// identity is unlocked. This is critical because at boot time the
+    /// identity is typically locked, so the node starts with TCP fallback.
+    /// Once the user unlocks their identity, we can derive the Iroh secret
+    /// key and create a proper Iroh transport with NAT traversal.
+    ///
+    /// Returns `Ok(true)` if the network was upgraded, `Ok(false)` if
+    /// already using Iroh or no upgrade was needed.
+    #[cfg(feature = "iroh-transport")]
+    pub async fn upgrade_network_to_iroh(&self) -> Result<bool, String> {
+        use crate::network::{NetworkSubsystem, TransportKind};
+
+        // Check if already using Iroh.
+        if let Ok(guard) = self.network.lock() {
+            if let Some(ref net) = *guard {
+                if net.transport_kind() == TransportKind::Iroh {
+                    tracing::debug!("network already using Iroh transport, no upgrade needed");
+                    return Ok(false);
+                }
+            }
+        }
+
+        // Derive secret key from unlocked identity.
+        let secret_key = self
+            .identity
+            .get_signing_keypair()
+            .map_err(|e| format!("identity not unlocked: {e}"))?
+            .secret_bytes();
+
+        // Create new Iroh transport with deterministic key.
+        let new_net = NetworkSubsystem::new_iroh_with_key(*secret_key)
+            .await
+            .map_err(|e| format!("Iroh transport init failed: {e}"))?;
+
+        let new_net = std::sync::Arc::new(new_net);
+        tracing::info!(
+            node_id = %new_net.local_id(),
+            "upgraded network transport from TCP to Iroh"
+        );
+
+        // Replace the network subsystem.
+        if let Ok(mut guard) = self.network.lock() {
+            // Shut down the old TCP transport.
+            if guard.is_some() {
+                // The old network subsystem will be dropped when the Arc refcount hits zero.
+                tracing::debug!("replacing old TCP network subsystem");
+            }
+            *guard = Some(new_net);
+        }
+
+        Ok(true)
+    }
+
     /// How long the node has been running, in seconds.
     pub fn uptime_secs(&self) -> u64 {
         self.started_at.elapsed().as_secs()

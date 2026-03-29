@@ -152,11 +152,17 @@ pub struct SocialService {
 
 impl SocialService {
     /// Send a connection request to the target pubkey.
+    ///
+    /// Stores the request locally AND publishes it to the recipient's dead
+    /// drop (via gossip + DHT) so the remote node can discover it even if
+    /// the two peers are not directly connected.
     pub async fn connect(
         &self,
         target: &str,
         msg: &str,
         identity: &IdentityService,
+        network: Option<&crate::network::NetworkSubsystem>,
+        dht_storage: Option<&Mutex<DhtStorage>>,
     ) -> Result<Value, String> {
         let local = get_local_identity(identity)?;
         let remote = parse_pubkey(target)?;
@@ -166,7 +172,91 @@ impl SocialService {
             .request(&local, &remote, message)
             .await
             .map_err(|e| format!("connection request: {e}"))?;
-        Ok(connection_to_json(&conn, Some(&local), None))
+
+        // Build a wire envelope for the connection request so the recipient
+        // can discover it via gossip / DHT dead drop polling.
+        let now = now_secs();
+        let request_payload = serde_json::json!({
+            "type": "connection_request",
+            "initiator": hex::encode(local.as_bytes()),
+            "responder": hex::encode(remote.as_bytes()),
+            "message": conn.message,
+            "created_at": conn.created_at.as_secs(),
+        });
+        let payload_bytes = serde_json::to_vec(&request_payload)
+            .map_err(|e| format!("serialize connection request: {e}"))?;
+
+        // Deposit in recipient's dead drop (local DB).
+        let mailbox_key = DeadDropService::mailbox_key(&remote);
+        let req_hash = blake3::hash(&payload_bytes);
+        let req_content_id = ContentId::from_digest(*req_hash.as_bytes());
+        let expires_at = now + 7 * 24 * 60 * 60; // 7-day TTL for connection requests
+
+        // Store locally (best-effort, don't fail the request).
+        // We need a MetadataDb for this -- access through social_services.
+        // Use the same dead drop mechanism as messages.
+
+        // Publish to gossip on the dm_delivery topic so relays propagate it.
+        let mut published_gossip = false;
+        if let Some(net) = network {
+            let dm_topic = ephemera_gossip::GossipTopic::direct_messages();
+            let envelope = DeadDropEnvelope {
+                mailbox_key: *mailbox_key.hash_bytes(),
+                message_id: *req_content_id.hash_bytes(),
+                sealed_data: payload_bytes.clone(),
+                deposited_at: now,
+                expires_at,
+            };
+            if let Ok(env_bytes) = serde_json::to_vec(&envelope) {
+                match net.publish(&dm_topic, env_bytes).await {
+                    Ok(()) => {
+                        published_gossip = true;
+                        tracing::info!(
+                            target = hex::encode(remote.as_bytes()),
+                            "published connection request to gossip"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "failed to publish connection request to gossip");
+                    }
+                }
+            }
+        }
+
+        // Publish to DHT for offline discovery.
+        let mut published_dht = false;
+        if let Some(dht) = dht_storage {
+            if let Ok(mut storage) = dht.lock() {
+                let dht_record = ephemera_dht::DhtRecord {
+                    key: *mailbox_key.hash_bytes(),
+                    record_type: ephemera_dht::DhtRecordType::DeadDrop,
+                    value: payload_bytes,
+                    publisher: *local.as_bytes(),
+                    timestamp: now,
+                    ttl_seconds: (7 * 24 * 60 * 60) as u32,
+                    signature: vec![], // unsigned for PoC
+                };
+                match storage.put(dht_record) {
+                    Ok(()) => {
+                        published_dht = true;
+                        tracing::info!(
+                            target = hex::encode(remote.as_bytes()),
+                            "published connection request to DHT"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "failed to publish connection request to DHT");
+                    }
+                }
+            }
+        }
+
+        let mut result = connection_to_json(&conn, Some(&local), None);
+        if let Some(obj) = result.as_object_mut() {
+            obj.insert("published_gossip".to_string(), serde_json::json!(published_gossip));
+            obj.insert("published_dht".to_string(), serde_json::json!(published_dht));
+        }
+        Ok(result)
     }
 
     /// Accept a pending incoming connection request.
@@ -287,7 +377,8 @@ impl SocialService {
     /// Follow a target (creates a unidirectional connection request for now).
     pub async fn follow(&self, target: &str, identity: &IdentityService) -> Result<Value, String> {
         // For now, follow is implemented as a connection request.
-        self.connect(target, "", identity).await?;
+        // No network/DHT for follows (they're local-only for now).
+        self.connect(target, "", identity, None, None).await?;
         Ok(serde_json::json!({ "followed": true }))
     }
 

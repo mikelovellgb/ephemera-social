@@ -185,3 +185,32 @@ pub fn register_network(router: &mut Router, network: &Arc<NetworkSubsystem>) {
         }
     });
 }
+
+/// Register stub `network.*` methods that return a descriptive error.
+///
+/// Called when the network subsystem is not available (e.g. identity locked
+/// at startup, transport failed to initialize). This ensures the methods
+/// exist so clients get a proper JSON-RPC error instead of "method not found".
+pub fn register_network_stubs(router: &mut Router) {
+    let unavailable = || JsonRpcError {
+        code: error_codes::NETWORK_UNAVAILABLE,
+        message: "network subsystem not available — unlock identity and restart node".into(),
+        data: None,
+    };
+
+    router.register("network.info", move |_params| {
+        async move { Err::<Value, _>(unavailable()) }
+    });
+
+    router.register("network.connect", move |_params| {
+        async move { Err::<Value, _>(unavailable()) }
+    });
+
+    router.register("network.peers", move |_params| {
+        async move { Err::<Value, _>(unavailable()) }
+    });
+
+    router.register("network.disconnect", move |_params| {
+        async move { Err::<Value, _>(unavailable()) }
+    });
+}

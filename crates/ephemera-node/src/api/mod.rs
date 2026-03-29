@@ -43,9 +43,14 @@ pub fn build_router_with_network(
     content::register_discover(&mut router, &services);
     dht::register_dht(&mut router, &services);
 
-    // Register network methods if a network subsystem is available.
+    // Register network methods. When a network subsystem is available, wire
+    // the real handlers. When it's not (identity locked, transport failed),
+    // register stubs that return a descriptive NETWORK_UNAVAILABLE error so
+    // clients get a proper error instead of "method not found".
     if let Some(ref network) = net {
         network::register_network(&mut router, network);
+    } else {
+        network::register_network_stubs(&mut router);
     }
 
     // Collect all method names for meta.capabilities, then register meta
@@ -56,17 +61,15 @@ pub fn build_router_with_network(
             method_names.push(name.to_string());
         }
     }
-    // Include network method names in capabilities even if not yet registered.
-    if net.is_some() {
-        for name in [
-            "network.info",
-            "network.connect",
-            "network.peers",
-            "network.disconnect",
-        ] {
-            if !method_names.contains(&name.to_string()) {
-                method_names.push(name.to_string());
-            }
+    // Network method names are always registered now (real or stubs).
+    for name in [
+        "network.info",
+        "network.connect",
+        "network.peers",
+        "network.disconnect",
+    ] {
+        if !method_names.contains(&name.to_string()) {
+            method_names.push(name.to_string());
         }
     }
     method_names.sort();
@@ -85,10 +88,23 @@ fn register_identity(router: &mut Router, services: &Arc<ServiceContainer>) {
         let svc = Arc::clone(&svc);
         async move {
             let passphrase = extract_str(&params, "passphrase")?;
-            svc.identity
+            let result = svc.identity
                 .create(&passphrase)
                 .await
-                .map_err(internal_error)
+                .map_err(internal_error)?;
+
+            // After creating identity, try to upgrade network from TCP to Iroh
+            // so the node is discoverable via Iroh relay.
+            #[cfg(feature = "iroh-transport")]
+            {
+                match svc.upgrade_network_to_iroh().await {
+                    Ok(true) => tracing::info!("network upgraded to Iroh after identity creation"),
+                    Ok(false) => {}
+                    Err(e) => tracing::warn!(error = %e, "failed to upgrade network to Iroh"),
+                }
+            }
+
+            Ok(result)
         }
     });
 
@@ -97,10 +113,23 @@ fn register_identity(router: &mut Router, services: &Arc<ServiceContainer>) {
         let svc = Arc::clone(&svc);
         async move {
             let passphrase = extract_str(&params, "passphrase")?;
-            svc.identity
+            let result = svc.identity
                 .unlock(&passphrase)
                 .await
-                .map_err(internal_error)
+                .map_err(internal_error)?;
+
+            // After unlocking identity, try to upgrade network from TCP to Iroh
+            // so the node is discoverable via Iroh relay / NAT traversal.
+            #[cfg(feature = "iroh-transport")]
+            {
+                match svc.upgrade_network_to_iroh().await {
+                    Ok(true) => tracing::info!("network upgraded to Iroh after identity unlock"),
+                    Ok(false) => {}
+                    Err(e) => tracing::warn!(error = %e, "failed to upgrade network to Iroh"),
+                }
+            }
+
+            Ok(result)
         }
     });
 
@@ -268,7 +297,16 @@ fn register_identity(router: &mut Router, services: &Arc<ServiceContainer>) {
                 }))
                 .collect::<Result<Vec<_>, _>>()?;
             let passphrase = extract_str(&params, "passphrase")?;
-            svc.identity.import_mnemonic(&words, &passphrase).await.map_err(internal_error)
+            let result = svc.identity.import_mnemonic(&words, &passphrase).await.map_err(internal_error)?;
+
+            #[cfg(feature = "iroh-transport")]
+            {
+                if let Err(e) = svc.upgrade_network_to_iroh().await {
+                    tracing::warn!(error = %e, "failed to upgrade network to Iroh after mnemonic import");
+                }
+            }
+
+            Ok(result)
         }
     });
     let svc = Arc::clone(services);
@@ -278,10 +316,19 @@ fn register_identity(router: &mut Router, services: &Arc<ServiceContainer>) {
             let data = extract_str(&params, "data")?;
             let backup_passphrase = extract_str(&params, "backup_passphrase")?;
             let new_passphrase = extract_str(&params, "new_passphrase")?;
-            svc.identity
+            let result = svc.identity
                 .import_backup(&data, &backup_passphrase, &new_passphrase)
                 .await
-                .map_err(internal_error)
+                .map_err(internal_error)?;
+
+            #[cfg(feature = "iroh-transport")]
+            {
+                if let Err(e) = svc.upgrade_network_to_iroh().await {
+                    tracing::warn!(error = %e, "failed to upgrade network to Iroh after backup import");
+                }
+            }
+
+            Ok(result)
         }
     });
 
@@ -292,10 +339,19 @@ fn register_identity(router: &mut Router, services: &Arc<ServiceContainer>) {
         async move {
             let qr_hex = extract_str(&params, "qr_hex")?;
             let passphrase = extract_str(&params, "passphrase")?;
-            svc.identity
+            let result = svc.identity
                 .import_qr(&qr_hex, &passphrase)
                 .await
-                .map_err(internal_error)
+                .map_err(internal_error)?;
+
+            #[cfg(feature = "iroh-transport")]
+            {
+                if let Err(e) = svc.upgrade_network_to_iroh().await {
+                    tracing::warn!(error = %e, "failed to upgrade network to Iroh after QR import");
+                }
+            }
+
+            Ok(result)
         }
     });
 
@@ -336,10 +392,27 @@ fn register_handles(router: &mut Router, services: &Arc<ServiceContainer>) {
         let svc = Arc::clone(&svc);
         async move {
             let name = extract_str(&params, "name")?;
-            HandleService::register_and_publish(
-                &name, &svc.identity, &svc.handle_registry, &svc.dht_storage,
-            )
-            .map_err(internal_error)
+            // PoW computation is CPU-intensive and can take seconds to minutes.
+            // Run it on a blocking thread so it doesn't stall the async runtime
+            // (which would block ALL other RPC calls).
+            let svc_inner = Arc::clone(&svc);
+            let name_inner = name.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                HandleService::register_and_publish(
+                    &name_inner,
+                    &svc_inner.identity,
+                    &svc_inner.handle_registry,
+                    &svc_inner.dht_storage,
+                )
+            })
+            .await
+            .map_err(|e| JsonRpcError {
+                code: error_codes::POW_FAILED,
+                message: format!("handle registration task failed: {e}"),
+                data: None,
+            })?
+            .map_err(internal_error)?;
+            Ok(result)
         }
     });
 
