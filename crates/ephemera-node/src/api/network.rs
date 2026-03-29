@@ -11,6 +11,9 @@
 
 use crate::network::{NetworkSubsystem, TransportKind};
 use crate::rpc::{error_codes, JsonRpcError, Router};
+use crate::services::ServiceContainer;
+use ephemera_transport::PeerAddr;
+use ephemera_types::NodeId;
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -252,6 +255,143 @@ pub fn register_network_stubs(router: &mut Router) {
                 "iroh_available": false,
                 "error": "network subsystem not available — unlock identity and restart node",
             }))
+        }
+    });
+}
+
+/// Register network methods that dynamically read from `services.network`.
+/// This ensures they always see the current network subsystem even after
+/// an upgrade from TCP to Iroh (which replaces the Arc in the Mutex).
+pub fn register_network_dynamic(router: &mut Router, services: &Arc<ServiceContainer>) {
+    // Helper: get the current network or return an error.
+    fn get_net(svc: &ServiceContainer) -> Result<Arc<NetworkSubsystem>, JsonRpcError> {
+        svc.network
+            .lock()
+            .map_err(|_| JsonRpcError {
+                code: error_codes::INTERNAL_ERROR,
+                message: "network lock poisoned".into(),
+                data: None,
+            })?
+            .clone()
+            .ok_or_else(|| JsonRpcError {
+                code: error_codes::NETWORK_UNAVAILABLE,
+                message: "network not available — unlock identity first".into(),
+                data: None,
+            })
+    }
+
+    let svc = Arc::clone(services);
+    router.register("network.status", move |_params| {
+        let svc = Arc::clone(&svc);
+        async move {
+            let guard = svc.network.lock().map_err(|_| JsonRpcError {
+                code: error_codes::INTERNAL_ERROR,
+                message: "lock".into(),
+                data: None,
+            })?;
+            match &*guard {
+                Some(net) => {
+                    let kind = net.transport_kind();
+                    let transport_name = match kind {
+                        TransportKind::Tcp => "tcp",
+                        #[cfg(feature = "iroh-transport")]
+                        TransportKind::Iroh => "iroh",
+                    };
+                    let iroh_available = matches!(kind, TransportKind::Iroh);
+                    Ok(serde_json::json!({
+                        "transport": transport_name,
+                        "node_id": net.local_id().to_string(),
+                        "peer_count": net.peer_count(),
+                        "iroh_available": iroh_available,
+                        "error": Value::Null,
+                    }))
+                }
+                None => Ok(serde_json::json!({
+                    "transport": "none",
+                    "node_id": Value::Null,
+                    "peer_count": 0,
+                    "iroh_available": false,
+                    "error": "network not started — unlock identity",
+                })),
+            }
+        }
+    });
+
+    let svc = Arc::clone(services);
+    router.register("network.connect", move |params| {
+        let svc = Arc::clone(&svc);
+        async move {
+            let net = get_net(&svc)?;
+            let addr = params.get("addr").and_then(|v| v.as_str()).map(String::from);
+            let node_id = params.get("node_id").and_then(|v| v.as_str()).map(String::from);
+            if let Some(nid) = node_id {
+                let nid_bytes = hex::decode(&nid).map_err(|e| JsonRpcError {
+                    code: error_codes::INVALID_PARAMS,
+                    message: format!("bad node_id hex: {e}"),
+                    data: None,
+                })?;
+                let mut arr = [0u8; 32];
+                if nid_bytes.len() == 32 { arr.copy_from_slice(&nid_bytes); }
+                let peer_addr = PeerAddr {
+                    node_id: NodeId::from_bytes(arr),
+                    addresses: addr.iter().cloned().collect(),
+                };
+                net.connect_to_peer(&peer_addr).await.map_err(|e| JsonRpcError {
+                    code: error_codes::INTERNAL_ERROR,
+                    message: format!("connect failed: {e}"),
+                    data: None,
+                })?;
+                Ok(serde_json::json!({"connected": true, "node_id": nid}))
+            } else if let Some(a) = addr {
+                let peer_addr = PeerAddr {
+                    node_id: NodeId::from_bytes([0u8; 32]),
+                    addresses: vec![a.clone()],
+                };
+                net.connect_to_peer(&peer_addr).await.map_err(|e| JsonRpcError {
+                    code: error_codes::INTERNAL_ERROR,
+                    message: format!("connect failed: {e}"),
+                    data: None,
+                })?;
+                Ok(serde_json::json!({"connected": true, "addr": a}))
+            } else {
+                Err(JsonRpcError {
+                    code: error_codes::INVALID_PARAMS,
+                    message: "provide addr or node_id".into(),
+                    data: None,
+                })
+            }
+        }
+    });
+
+    let svc = Arc::clone(services);
+    router.register("network.peers", move |_params| {
+        let svc = Arc::clone(&svc);
+        async move {
+            let net = get_net(&svc)?;
+            let peers = net.connected_peers();
+            let list: Vec<Value> = peers.iter().map(|p| {
+                serde_json::json!({"node_id": hex::encode(p.as_bytes())})
+            }).collect();
+            Ok(serde_json::json!({"peers": list, "count": list.len()}))
+        }
+    });
+
+    let svc = Arc::clone(services);
+    router.register("network.info", move |_params| {
+        let svc = Arc::clone(&svc);
+        async move {
+            let net = get_net(&svc)?;
+            Ok(serde_json::json!({
+                "transport": format!("{:?}", net.transport_kind()),
+                "node_id": net.local_id().to_string(),
+                "peer_count": net.peer_count(),
+            }))
+        }
+    });
+
+    router.register("network.disconnect", move |_params| {
+        async move {
+            Ok(serde_json::json!({"disconnected": false, "note": "disconnect not yet implemented"}))
         }
     });
 }

@@ -48,15 +48,11 @@ pub fn build_router_with_network(
     content::register_discover(&mut router, &services);
     dht::register_dht(&mut router, &services);
 
-    // Register network methods. When a network subsystem is available, wire
-    // the real handlers. When it's not (identity locked, transport failed),
-    // register stubs that return a descriptive NETWORK_UNAVAILABLE error so
-    // clients get a proper error instead of "method not found".
-    if let Some(ref network) = net {
-        network::register_network(&mut router, network);
-    } else {
-        network::register_network_stubs(&mut router);
-    }
+    // Register network methods that read from services.network (the Mutex).
+    // This ensures they always see the CURRENT network subsystem, even after
+    // an upgrade from TCP to Iroh. Previously we passed a direct Arc which
+    // became stale after upgrade.
+    network::register_network_dynamic(&mut router, &services);
 
     // Collect all method names for meta.capabilities, then register meta
     // (only add names for methods not yet registered above).
