@@ -894,7 +894,20 @@
         var networkSection = Ephemera.el('div', 'settings-section');
         networkSection.appendChild(Ephemera.el('h2', '', 'Network'));
 
+        // Network status diagnostic panel
+        var statusGroup = Ephemera.el('div', 'settings-group');
+        var statusWrap = Ephemera.el('div', '');
+        statusWrap.style.padding = 'var(--sp-3) var(--sp-4)';
+        var statusLoading = Ephemera.el('p', '');
+        statusLoading.style.cssText = 'font-size:var(--fs-sm);color:var(--text-secondary);';
+        statusLoading.textContent = 'Loading network status...';
+        statusWrap.appendChild(statusLoading);
+        statusGroup.appendChild(statusWrap);
+        networkSection.appendChild(statusGroup);
+        renderNetworkStatus(statusWrap);
+
         var netGroup = Ephemera.el('div', 'settings-group');
+        netGroup.style.marginTop = '12px';
         var peerListWrap = Ephemera.el('div', '');
         peerListWrap.style.padding = 'var(--sp-3) var(--sp-4)';
         var peerLoading = Ephemera.el('p', '');
@@ -936,6 +949,63 @@
 
         container.appendChild(networkSection);
         refreshPeerList(peerListWrap);
+
+        // ---- Debug Console (pre-release) ----
+        var debugSection = Ephemera.el('div', 'settings-section');
+        debugSection.appendChild(Ephemera.el('h2', '', 'Debug Console'));
+
+        var debugPanel = Ephemera.el('div', 'debug-panel');
+
+        // Network status card
+        var debugStatus = Ephemera.el('div', 'debug-status');
+        debugStatus.textContent = 'Loading debug info...';
+        debugPanel.appendChild(debugStatus);
+
+        // Log output area (scrollable monospace)
+        var debugLogArea = Ephemera.el('div', 'debug-log-area');
+        debugLogArea.setAttribute('role', 'log');
+        debugLogArea.setAttribute('aria-label', 'Debug log output');
+        debugPanel.appendChild(debugLogArea);
+
+        // Controls row
+        var debugControls = Ephemera.el('div', 'debug-controls');
+
+        var refreshDebugBtn = Ephemera.el('button', 'btn btn-ghost btn-sm', 'Refresh');
+        refreshDebugBtn.addEventListener('click', function () {
+            loadDebugLog(debugStatus, debugLogArea);
+        });
+        debugControls.appendChild(refreshDebugBtn);
+
+        var autoRefreshLabel = Ephemera.el('label', 'debug-auto-label');
+        var autoRefreshCheck = document.createElement('input');
+        autoRefreshCheck.type = 'checkbox';
+        autoRefreshCheck.checked = false;
+        autoRefreshLabel.appendChild(autoRefreshCheck);
+        autoRefreshLabel.appendChild(document.createTextNode(' Auto-refresh'));
+        debugControls.appendChild(autoRefreshLabel);
+
+        debugPanel.appendChild(debugControls);
+        debugSection.appendChild(debugPanel);
+        container.appendChild(debugSection);
+
+        // Initial load
+        loadDebugLog(debugStatus, debugLogArea);
+
+        // Auto-refresh timer
+        var autoTimer = null;
+        autoRefreshCheck.addEventListener('change', function () {
+            if (autoRefreshCheck.checked) {
+                autoTimer = setInterval(function () {
+                    if (!showingSettings) {
+                        clearInterval(autoTimer);
+                        return;
+                    }
+                    loadDebugLog(debugStatus, debugLogArea);
+                }, 3000);
+            } else {
+                if (autoTimer) clearInterval(autoTimer);
+            }
+        });
 
         // ---- Danger Zone ----
         var dangerSection = Ephemera.el('div', 'settings-section danger-zone');
@@ -1131,6 +1201,82 @@
         return value.toFixed(i > 0 ? 1 : 0) + ' ' + units[i];
     }
 
+    async function renderNetworkStatus(container) {
+        try {
+            var status = await Ephemera.rpc('network.status', {});
+            container.innerHTML = '';
+
+            // Transport row
+            var transportRow = Ephemera.el('div', 'settings-row');
+            transportRow.appendChild(Ephemera.el('span', 'settings-row-label', 'Transport'));
+            var transportVal = status.transport || 'none';
+            var transportDisplay = transportVal === 'iroh' ? 'Iroh (QUIC + NAT traversal)'
+                : transportVal === 'tcp' ? 'TCP (direct only)'
+                : 'Not available';
+            var transportSpan = Ephemera.el('span', 'settings-row-value', transportDisplay);
+            if (transportVal === 'iroh') {
+                transportSpan.style.color = 'var(--accent-green, #4caf50)';
+            } else if (transportVal === 'tcp') {
+                transportSpan.style.color = 'var(--accent-warn, #ff9800)';
+            } else {
+                transportSpan.style.color = 'var(--accent-red, #f44336)';
+            }
+            transportRow.appendChild(transportSpan);
+            container.appendChild(transportRow);
+
+            // Node ID row
+            if (status.node_id) {
+                var nodeIdRow = Ephemera.el('div', 'settings-row');
+                nodeIdRow.appendChild(Ephemera.el('span', 'settings-row-label', 'Node ID'));
+                var nodeIdText = status.node_id;
+                if (nodeIdText.length > 20) {
+                    nodeIdText = nodeIdText.slice(0, 12) + '...' + nodeIdText.slice(-8);
+                }
+                var nodeIdSpan = Ephemera.el('span', 'settings-row-value');
+                nodeIdSpan.style.fontFamily = 'var(--font-mono, monospace)';
+                nodeIdSpan.style.fontSize = 'var(--fs-xs)';
+                nodeIdSpan.textContent = nodeIdText;
+                nodeIdSpan.title = status.node_id;
+                nodeIdRow.appendChild(nodeIdSpan);
+                container.appendChild(nodeIdRow);
+            }
+
+            // Peer count row
+            var peerRow = Ephemera.el('div', 'settings-row');
+            peerRow.appendChild(Ephemera.el('span', 'settings-row-label', 'Connected Peers'));
+            peerRow.appendChild(Ephemera.el('span', 'settings-row-value', String(status.peer_count || 0)));
+            container.appendChild(peerRow);
+
+            // Iroh availability row
+            var irohRow = Ephemera.el('div', 'settings-row');
+            irohRow.appendChild(Ephemera.el('span', 'settings-row-label', 'Iroh Available'));
+            var irohVal = status.iroh_available ? 'Yes' : 'No';
+            var irohSpan = Ephemera.el('span', 'settings-row-value', irohVal);
+            irohSpan.style.color = status.iroh_available
+                ? 'var(--accent-green, #4caf50)'
+                : 'var(--text-tertiary)';
+            irohRow.appendChild(irohSpan);
+            container.appendChild(irohRow);
+
+            // Error row (if present)
+            if (status.error) {
+                var errRow = Ephemera.el('div', 'settings-row');
+                errRow.appendChild(Ephemera.el('span', 'settings-row-label', 'Error'));
+                var errSpan = Ephemera.el('span', 'settings-row-value', status.error);
+                errSpan.style.color = 'var(--accent-red, #f44336)';
+                errSpan.style.fontSize = 'var(--fs-xs)';
+                errRow.appendChild(errSpan);
+                container.appendChild(errRow);
+            }
+        } catch (err) {
+            container.innerHTML = '';
+            var errMsg = Ephemera.el('p', '');
+            errMsg.style.cssText = 'font-size:var(--fs-sm);color:var(--text-tertiary);';
+            errMsg.textContent = 'Network status unavailable: ' + (err.message || err);
+            container.appendChild(errMsg);
+        }
+    }
+
     async function refreshPeerList(container) {
         try {
             var result = await Ephemera.rpc('network.peers', {});
@@ -1189,6 +1335,72 @@
             statusRow.style.fontSize = 'var(--fs-sm)';
             statusRow.style.color = 'var(--text-secondary)';
             container.appendChild(statusRow);
+        }
+    }
+
+    // ================================================================
+    // Debug Console helpers
+    // ================================================================
+
+    async function loadDebugLog(statusEl, logAreaEl) {
+        try {
+            var result = await Ephemera.rpc('meta.debug_log', { count: 50 });
+
+            // Render network status card
+            statusEl.innerHTML = '';
+            var ns = result.network_status || {};
+            var transportLabel = ns.transport === 'iroh' ? 'Iroh (QUIC + NAT traversal)'
+                : ns.transport === 'tcp' ? 'TCP (direct only)'
+                : 'Not available';
+            var transportColor = ns.transport === 'iroh' ? '#3dd68c'
+                : ns.transport === 'tcp' ? '#ffb347'
+                : '#ff6b6b';
+
+            var statusLines = [
+                { label: 'Transport', value: transportLabel, color: transportColor },
+                { label: 'Node ID', value: ns.node_id ? (ns.node_id.length > 20 ? ns.node_id.slice(0, 10) + '...' : ns.node_id) : 'none' },
+                { label: 'Peers', value: String(ns.peer_count || 0) },
+                { label: 'Iroh Active', value: ns.iroh_active ? 'Yes' : 'No', color: ns.iroh_active ? '#3dd68c' : '#ff6b6b' },
+            ];
+
+            statusLines.forEach(function (s) {
+                var row = Ephemera.el('div', 'debug-status-row');
+                row.appendChild(Ephemera.el('span', 'debug-status-label', s.label + ':'));
+                var val = Ephemera.el('span', 'debug-status-value', s.value);
+                if (s.color) val.style.color = s.color;
+                row.appendChild(val);
+                statusEl.appendChild(row);
+            });
+
+            // Render log lines
+            logAreaEl.innerHTML = '';
+            var logs = result.logs || [];
+            if (logs.length === 0) {
+                logAreaEl.appendChild(Ephemera.el('div', 'debug-log-line info', 'No log entries captured yet.'));
+            } else {
+                logs.forEach(function (entry) {
+                    var levelClass = (entry.level || '').toLowerCase();
+                    var line = Ephemera.el('div', 'debug-log-line ' + levelClass);
+                    var ts = Ephemera.el('span', 'debug-log-ts', entry.timestamp || '');
+                    var lvl = Ephemera.el('span', 'debug-log-level', entry.level || '');
+                    var tgt = Ephemera.el('span', 'debug-log-target', entry.target || '');
+                    var msg = Ephemera.el('span', 'debug-log-msg', entry.message || '');
+                    line.appendChild(ts);
+                    line.appendChild(document.createTextNode(' '));
+                    line.appendChild(lvl);
+                    line.appendChild(document.createTextNode(' '));
+                    line.appendChild(tgt);
+                    line.appendChild(document.createTextNode(' '));
+                    line.appendChild(msg);
+                    logAreaEl.appendChild(line);
+                });
+                // Auto-scroll to bottom
+                logAreaEl.scrollTop = logAreaEl.scrollHeight;
+            }
+        } catch (err) {
+            statusEl.innerHTML = '';
+            statusEl.appendChild(Ephemera.el('div', 'debug-status-row', 'Debug log unavailable: ' + (err.message || err)));
+            logAreaEl.innerHTML = '';
         }
     }
 

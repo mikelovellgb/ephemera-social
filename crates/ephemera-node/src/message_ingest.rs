@@ -136,12 +136,76 @@ pub async fn message_ingest_loop(
                     }
                 }
 
+                // If addressed to us, check if it's a connection request.
+                // Connection request payloads are JSON with type: "connection_request"
+                // (NOT encrypted, unlike DM messages).
+                let mut is_connection_request = false;
+                if is_for_us {
+                    if let Ok(payload) = serde_json::from_slice::<serde_json::Value>(&envelope.sealed_data) {
+                        if payload.get("type").and_then(|t| t.as_str()) == Some("connection_request") {
+                            is_connection_request = true;
+                            // Extract initiator and responder pubkeys.
+                            let initiator_hex = payload.get("initiator").and_then(|v| v.as_str()).unwrap_or("");
+                            let message = payload.get("message").and_then(|v| v.as_str());
+                            let created_at = payload.get("created_at").and_then(|v| v.as_i64()).unwrap_or(now as i64);
+
+                            if let (Ok(initiator_bytes), Some(ref pk)) = (hex::decode(initiator_hex), &our_pubkey) {
+                                if initiator_bytes.len() == 32 {
+                                    let local_bytes = pk.as_bytes().to_vec();
+                                    // Insert as pending_incoming connection (ignore if already exists).
+                                    let insert_result = db.conn().execute(
+                                        "INSERT OR IGNORE INTO connections \
+                                         (local_pubkey, remote_pubkey, status, created_at, updated_at, message, initiator_pubkey) \
+                                         VALUES (?1, ?2, 'pending_incoming', ?3, ?3, ?4, ?2)",
+                                        rusqlite::params![local_bytes, initiator_bytes, created_at, message],
+                                    );
+                                    match insert_result {
+                                        Ok(rows) if rows > 0 => {
+                                            tracing::info!(
+                                                from = %initiator_hex,
+                                                "message ingest: received connection request"
+                                            );
+                                        }
+                                        Ok(_) => {
+                                            tracing::debug!(
+                                                from = %initiator_hex,
+                                                "message ingest: connection request already exists (ignored)"
+                                            );
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                error = %e,
+                                                "message ingest: failed to insert connection request"
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // Drop the DB lock before emitting events.
                 drop(db);
 
-                // If addressed to us, emit a MessageReceived event.
+                // If addressed to us and it's a connection request, emit ConnectionRequestReceived.
+                // For regular messages, emit MessageReceived.
                 if is_for_us {
-                    if let Some(ref pk) = our_pubkey {
+                    if is_connection_request {
+                        if let Ok(payload) = serde_json::from_slice::<serde_json::Value>(&envelope.sealed_data) {
+                            let initiator_hex = payload.get("initiator").and_then(|v| v.as_str()).unwrap_or("");
+                            if let Ok(init_bytes) = hex::decode(initiator_hex) {
+                                if init_bytes.len() == 32 {
+                                    let mut arr = [0u8; 32];
+                                    arr.copy_from_slice(&init_bytes);
+                                    let from_key = IdentityKey::from_bytes(arr);
+                                    event_bus.emit(Event::ConnectionRequestReceived {
+                                        from: from_key,
+                                    });
+                                }
+                            }
+                        }
+                    } else if let Some(ref pk) = our_pubkey {
                         let msg_id_hex = hex::encode(envelope.message_id);
                         tracing::info!(
                             message_id = %msg_id_hex,

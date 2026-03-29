@@ -88,6 +88,36 @@ pub fn register_social(router: &mut Router, services: &Arc<ServiceContainer>) {
     });
 
     let svc = Arc::clone(services);
+    router.register("social.cancel_request", move |params| {
+        let svc = Arc::clone(&svc);
+        async move {
+            let target = extract_str(&params, "target")?;
+            svc.social
+                .cancel_request(&target, &svc.identity)
+                .await
+                .map_err(internal_error)
+        }
+    });
+
+    let svc = Arc::clone(services);
+    router.register("social.resend_request", move |params| {
+        let svc = Arc::clone(&svc);
+        async move {
+            let target = extract_str(&params, "target")?;
+            let message = params.get("message").and_then(|v| v.as_str()).unwrap_or("");
+            let net_arc = {
+                let guard = svc.network.lock().map_err(|e| internal_error(format!("lock: {e}")))?;
+                guard.clone()
+            };
+            let net_ref = net_arc.as_deref();
+            svc.social
+                .resend_request(&target, message, &svc.identity, net_ref, Some(&svc.dht_storage))
+                .await
+                .map_err(internal_error)
+        }
+    });
+
+    let svc = Arc::clone(services);
     router.register("social.list_connections", move |params| {
         let svc = Arc::clone(&svc);
         async move {

@@ -5,13 +5,16 @@
 //! [`run`] from their platform-specific entry points.
 
 use ephemera_config::NodeConfig;
-use ephemera_node::api::build_router;
+use ephemera_node::api::build_router_with_network;
+use ephemera_node::debug_log::{DebugLogHandle, DebugLogLayer};
 use ephemera_node::rpc::{JsonRpcRequest, JsonRpcResponse, Router};
 use ephemera_node::EphemeraNode;
 use serde_json::Value;
 use std::sync::Arc;
 use tauri::Manager;
 use tokio::sync::{Mutex, OnceCell};
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 /// Inner state that becomes available once the node finishes booting.
 struct NodeState {
@@ -69,16 +72,34 @@ async fn rpc(
 
 /// Build and run the Tauri application.
 ///
-/// This is the shared entry point used by both `main.rs` (desktop) and the
-/// mobile library entry points (Android Activity / iOS AppDelegate).
+/// Initializes tracing with both the fmt layer (for console/logcat output)
+/// and the [`DebugLogLayer`] (for the in-app debug console). This single
+/// entry point is used by both `main.rs` (desktop) and the mobile targets.
 ///
 /// # Errors
 ///
 /// Returns an error if the Tauri runtime or the embedded node fail to start.
 pub fn run() {
+    // Create the shared debug log handle BEFORE tracing init so ALL startup
+    // logs (including Iroh init failures) are captured for the debug console.
+    let debug_log = DebugLogHandle::new();
+
+    // Initialize tracing with BOTH the fmt layer and the DebugLogLayer.
+    // This works for desktop (stdout) and mobile (logcat) alike.
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+
+    tracing_subscriber::registry()
+        .with(env_filter)
+        .with(tracing_subscriber::fmt::layer())
+        .with(DebugLogLayer::new(debug_log.clone()))
+        .init();
+
+    tracing::info!("Ephemera Tauri starting");
+
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![rpc])
-        .setup(|app| {
+        .setup(move |app| {
             // Register the state container immediately so that Tauri commands
             // can always extract it. The inner OnceCell starts empty and is
             // populated once the node finishes booting.
@@ -105,15 +126,12 @@ pub fn run() {
             tracing::info!(data_dir = %data_dir.display(), "ephemera data directory");
 
             // Boot the embedded node on the async runtime.
-            // Tauri's State is Arc-backed, so we clone the AppHandle and
-            // retrieve state from it inside the spawned task.
             let handle = app.handle().clone();
+            let debug_log_inner = debug_log.clone();
             tauri::async_runtime::spawn(async move {
-                match boot_node(data_dir).await {
+                match boot_node(data_dir, debug_log_inner).await {
                     Ok(node_state) => {
                         let state: tauri::State<'_, AppState> = handle.state();
-                        // OnceCell::set returns Err if already set, which
-                        // cannot happen here since we only boot once.
                         let _ = state.inner.set(node_state);
                         tracing::info!("ephemera node ready");
                     }
@@ -132,6 +150,7 @@ pub fn run() {
 /// Initialize the node and return the [`NodeState`].
 async fn boot_node(
     data_dir: std::path::PathBuf,
+    debug_log: DebugLogHandle,
 ) -> Result<NodeState, Box<dyn std::error::Error>> {
     let mut config = NodeConfig::load_or_create(&data_dir)?;
 
@@ -140,10 +159,15 @@ async fn boot_node(
         config.listen_addr = Some("0.0.0.0:9100".parse().expect("valid addr"));
     }
 
-    let mut node = EphemeraNode::new(config)?;
+    let mut node = EphemeraNode::with_debug_log(config, debug_log.clone())?;
     node.start().await?;
 
-    let router = build_router(Arc::clone(node.services()));
+    let network = node.network().cloned();
+    let router = build_router_with_network(
+        Arc::clone(node.services()),
+        network,
+        Some(debug_log),
+    );
 
     Ok(NodeState {
         router,
@@ -157,15 +181,11 @@ async fn boot_node(
 
 /// Mobile entry point using Tauri's macro.
 /// This generates the correct JNI symbols for Android and Swift bridge for iOS.
+///
+/// On mobile, `run()` handles tracing initialization and the rest of the
+/// application lifecycle.
 #[cfg(mobile)]
 #[tauri::mobile_entry_point]
 fn mobile_main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
-
     run();
 }

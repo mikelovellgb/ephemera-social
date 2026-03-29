@@ -282,6 +282,51 @@ impl SocialService {
         Ok(serde_json::json!({ "rejected": true }))
     }
 
+    /// Cancel a pending outgoing connection request.
+    ///
+    /// Deletes the local `pending_outgoing` row. The remote peer may still
+    /// have a `pending_incoming` row from a previously-delivered gossip/DHT
+    /// message, but we cannot recall it.
+    pub async fn cancel_request(
+        &self,
+        target: &str,
+        identity: &IdentityService,
+    ) -> Result<Value, String> {
+        let local = get_local_identity(identity)?;
+        let remote = parse_pubkey(target)?;
+        // Reuse the `reject` path -- it just DELETEs the row for (local, remote).
+        self.social_services
+            .reject(&local, &remote)
+            .await
+            .map_err(|e| format!("cancel request: {e}"))?;
+        Ok(serde_json::json!({ "cancelled": true }))
+    }
+
+    /// Resend a connection request to a target whose previous request may
+    /// not have been delivered (peer was offline, gossip/DHT failed, etc.).
+    ///
+    /// This deletes the old pending_outgoing row and re-creates it so that
+    /// the gossip + DHT publication happens again with a fresh timestamp.
+    pub async fn resend_request(
+        &self,
+        target: &str,
+        msg: &str,
+        identity: &IdentityService,
+        network: Option<&crate::network::NetworkSubsystem>,
+        dht_storage: Option<&Mutex<DhtStorage>>,
+    ) -> Result<Value, String> {
+        let local = get_local_identity(identity)?;
+        let remote = parse_pubkey(target)?;
+
+        // Remove the stale pending_outgoing row (best-effort).
+        let _ = self.social_services.reject(&local, &remote).await;
+
+        // Re-issue the connection request through the normal path, which
+        // stores a fresh row and publishes to gossip + DHT.
+        self.connect(target, msg, identity, network, dht_storage)
+            .await
+    }
+
     /// Remove (disconnect from) an existing connection.
     pub async fn disconnect(
         &self,

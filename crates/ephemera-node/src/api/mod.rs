@@ -7,6 +7,7 @@ mod meta;
 pub mod network;
 mod social;
 
+use crate::debug_log::DebugLogHandle;
 use crate::rpc::{error_codes, JsonRpcError, Router};
 use crate::services::ServiceContainer;
 use serde_json::Value;
@@ -17,13 +18,17 @@ use std::sync::Arc;
 /// The returned [`Router`] is ready to dispatch incoming requests.
 /// If `net` is `Some`, the `network.*` namespace methods are also registered.
 pub fn build_router(services: Arc<ServiceContainer>) -> Router {
-    build_router_with_network(services, None)
+    build_router_with_network(services, None, None)
 }
 
 /// Build a router that includes `network.*` methods when a network is provided.
+///
+/// When `debug_log` is `Some`, the `meta.debug_log` endpoint is registered so
+/// the frontend debug console can fetch captured log entries and network status.
 pub fn build_router_with_network(
     services: Arc<ServiceContainer>,
     net: Option<Arc<crate::network::NetworkSubsystem>>,
+    debug_log: Option<DebugLogHandle>,
 ) -> Router {
     let mut router = Router::new();
 
@@ -56,7 +61,12 @@ pub fn build_router_with_network(
     // Collect all method names for meta.capabilities, then register meta
     // (only add names for methods not yet registered above).
     let mut method_names = router.method_names();
-    for name in ["meta.capabilities", "meta.status", "meta.set_transport_tier"] {
+    for name in [
+        "meta.capabilities",
+        "meta.status",
+        "meta.set_transport_tier",
+        "meta.debug_log",
+    ] {
         if !method_names.contains(&name.to_string()) {
             method_names.push(name.to_string());
         }
@@ -67,13 +77,14 @@ pub fn build_router_with_network(
         "network.connect",
         "network.peers",
         "network.disconnect",
+        "network.status",
     ] {
         if !method_names.contains(&name.to_string()) {
             method_names.push(name.to_string());
         }
     }
     method_names.sort();
-    meta::register_meta(&mut router, &services, method_names);
+    meta::register_meta(&mut router, &services, method_names, net.clone(), debug_log);
 
     router
 }
@@ -98,9 +109,20 @@ fn register_identity(router: &mut Router, services: &Arc<ServiceContainer>) {
             #[cfg(feature = "iroh-transport")]
             {
                 match svc.upgrade_network_to_iroh().await {
-                    Ok(true) => tracing::info!("network upgraded to Iroh after identity creation"),
+                    Ok(true) => {
+                        let node_id = svc.network.lock().ok()
+                            .and_then(|g| g.as_ref().map(|n| n.local_id().to_string()))
+                            .unwrap_or_default();
+                        tracing::info!(
+                            "Network upgraded to Iroh. Your Node ID: {}. Other devices can find you by this ID.",
+                            node_id
+                        );
+                    }
                     Ok(false) => {}
-                    Err(e) => tracing::warn!(error = %e, "failed to upgrade network to Iroh"),
+                    Err(e) => tracing::warn!(
+                        "Iroh upgrade failed: {}. Using TCP fallback. Other devices cannot discover you automatically.",
+                        e
+                    ),
                 }
             }
 
@@ -123,9 +145,20 @@ fn register_identity(router: &mut Router, services: &Arc<ServiceContainer>) {
             #[cfg(feature = "iroh-transport")]
             {
                 match svc.upgrade_network_to_iroh().await {
-                    Ok(true) => tracing::info!("network upgraded to Iroh after identity unlock"),
+                    Ok(true) => {
+                        let node_id = svc.network.lock().ok()
+                            .and_then(|g| g.as_ref().map(|n| n.local_id().to_string()))
+                            .unwrap_or_default();
+                        tracing::info!(
+                            "Network upgraded to Iroh. Your Node ID: {}. Other devices can find you by this ID.",
+                            node_id
+                        );
+                    }
                     Ok(false) => {}
-                    Err(e) => tracing::warn!(error = %e, "failed to upgrade network to Iroh"),
+                    Err(e) => tracing::warn!(
+                        "Iroh upgrade failed: {}. Using TCP fallback. Other devices cannot discover you automatically.",
+                        e
+                    ),
                 }
             }
 

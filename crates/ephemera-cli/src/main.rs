@@ -117,7 +117,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     );
     let network = node.network().cloned();
-    let router = build_router_with_network(services, network);
+    let router = build_router_with_network(services, network, None);
 
     // Dispatch the CLI command as a JSON-RPC call.
     let response = match cli.command {

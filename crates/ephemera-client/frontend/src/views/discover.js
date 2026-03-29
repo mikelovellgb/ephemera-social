@@ -15,6 +15,8 @@
  *   - social.accept { from }
  *   - social.reject { from }
  *   - social.connect { target, message }
+ *   - social.cancel_request { target }
+ *   - social.resend_request { target, message }
  *   - social.disconnect { target }
  *   - network.connect { node_id }
  *   - identity.invite_qr {}
@@ -91,10 +93,50 @@
             card.appendChild(actions);
 
         } else if (conn.status === 'pending_outgoing') {
-            var pending = Ephemera.el('span', '');
-            pending.style.cssText = 'font-size:var(--fs-sm);color:var(--text-tertiary);flex-shrink:0;';
-            pending.textContent = 'Pending';
-            card.appendChild(pending);
+            var outActions = Ephemera.el('div', 'connection-actions');
+
+            var resendBtn = Ephemera.el('button', 'btn btn-primary btn-sm', 'Resend');
+            resendBtn.setAttribute('aria-label', 'Resend request to ' + displayName);
+            resendBtn.addEventListener('click', async function () {
+                resendBtn.disabled = true;
+                resendBtn.textContent = 'Sending...';
+                try {
+                    await Ephemera.rpc('social.resend_request', {
+                        target: conn.pseudonym_id,
+                        message: conn.message || 'Hi! I\'d like to connect.',
+                    });
+                    Ephemera.showToast('Request resent', 'success');
+                    renderDiscover(parentContainer);
+                } catch (err) {
+                    Ephemera.showToast('Failed: ' + err.message, 'error');
+                    resendBtn.disabled = false;
+                    resendBtn.textContent = 'Resend';
+                }
+            });
+            outActions.appendChild(resendBtn);
+
+            var cancelBtn = Ephemera.el('button', 'btn btn-ghost btn-sm', 'Cancel');
+            cancelBtn.setAttribute('aria-label', 'Cancel request to ' + displayName);
+            cancelBtn.addEventListener('click', async function () {
+                cancelBtn.disabled = true;
+                try {
+                    await Ephemera.rpc('social.cancel_request', { target: conn.pseudonym_id });
+                    card.style.opacity = '0';
+                    card.style.transition = 'opacity 300ms ease-out';
+                    setTimeout(function () { card.remove(); }, 300);
+                    Ephemera.showToast('Request cancelled', 'info');
+                } catch (err) {
+                    Ephemera.showToast('Failed: ' + err.message, 'error');
+                    cancelBtn.disabled = false;
+                }
+            });
+            outActions.appendChild(cancelBtn);
+
+            var pendingLabel = Ephemera.el('span', '');
+            pendingLabel.style.cssText = 'font-size:var(--fs-sm);color:var(--text-tertiary);flex-shrink:0;margin-right:8px;';
+            pendingLabel.textContent = 'Pending';
+            card.appendChild(pendingLabel);
+            card.appendChild(outActions);
 
         } else if (conn.status === 'connected') {
             var removeBtn = Ephemera.el('button', 'btn btn-ghost btn-sm', 'Remove');
@@ -222,7 +264,7 @@
                 var resolved = await resolvePubkey(target);
                 if (resolved) {
                     await connectViaPubkey(resolved, 'Connected via invite link!');
-                    Ephemera.showToast('Connection request sent!', 'success');
+                    // connectViaPubkey already shows step-by-step toasts
                     overlay.remove();
                 }
             } catch (err) {
@@ -326,24 +368,107 @@
     /**
      * Connect to a peer via pubkey: first establish network transport (Iroh),
      * then send a social connection request.
+     *
+     * Shows step-by-step status in a progress panel so the user can see
+     * exactly what is happening at each stage of the connection process.
+     * Essential for debugging on both desktop and phone.
      */
     async function connectViaPubkey(pubkey, message) {
-        // Step 1: Establish network-level connection via Iroh discovery.
-        // The pubkey IS the Iroh NodeId, so Iroh can discover the peer.
-        try {
-            await Ephemera.rpc('network.connect', { node_id: pubkey });
-        } catch (e) {
-            // Network connection may fail -- that's OK if the peer is offline.
-            // The social request will be queued locally and delivered when
-            // the peer comes online.
-            console.warn('Network connect (may be offline):', e.message || e);
+        // Create a visible step-by-step progress panel
+        var stepsContainer = document.querySelector('.connection-steps');
+        if (!stepsContainer) {
+            stepsContainer = Ephemera.el('div', 'connection-steps');
+            // Insert after the connect row in the discover view
+            var mainContent = document.getElementById('main-content');
+            if (mainContent) {
+                var connectRow = mainContent.querySelector('.discover-header');
+                if (connectRow && connectRow.nextSibling) {
+                    connectRow.parentNode.insertBefore(stepsContainer, connectRow.nextSibling.nextSibling);
+                } else if (mainContent.firstChild) {
+                    mainContent.insertBefore(stepsContainer, mainContent.firstChild.nextSibling);
+                } else {
+                    mainContent.appendChild(stepsContainer);
+                }
+            }
+        }
+        stepsContainer.innerHTML = '';
+
+        var shortId = pubkey.length > 12 ? pubkey.slice(0, 8) + '...' : pubkey;
+
+        function addStep(label, status) {
+            var step = Ephemera.el('div', 'connection-step ' + status);
+            var statusEl = Ephemera.el('span', 'step-status');
+            if (status === 'pending') statusEl.textContent = '-';
+            else if (status === 'active') statusEl.textContent = '...';
+            else if (status === 'success') statusEl.textContent = 'OK';
+            else if (status === 'error') statusEl.textContent = 'X';
+            step.appendChild(statusEl);
+            step.appendChild(Ephemera.el('span', '', label));
+            stepsContainer.appendChild(step);
+            return { el: step, statusEl: statusEl };
         }
 
-        // Step 2: Send social connection request
-        await Ephemera.rpc('social.connect', {
-            target: pubkey,
-            message: message || 'Hi! I\'d like to connect.',
-        });
+        function updateStep(stepObj, newLabel, newStatus) {
+            stepObj.el.className = 'connection-step ' + newStatus;
+            if (newStatus === 'active') stepObj.statusEl.textContent = '...';
+            else if (newStatus === 'success') stepObj.statusEl.textContent = 'OK';
+            else if (newStatus === 'error') stepObj.statusEl.textContent = 'X';
+            if (newLabel) {
+                var msgSpan = stepObj.el.querySelector('span:last-child');
+                if (msgSpan) msgSpan.textContent = newLabel;
+            }
+        }
+
+        // Step 1: Check network status
+        var step1 = addStep('[1/3] Checking network status...', 'active');
+        var step2 = addStep('[2/3] Connecting to peer...', 'pending');
+        var step3 = addStep('[3/3] Sending connection request...', 'pending');
+
+        var networkOk = false;
+        try {
+            var netStatus = await Ephemera.rpc('network.status', {});
+            var transportLabel = netStatus.iroh_available ? 'Iroh active' : (netStatus.transport || 'unknown');
+            var nodeLabel = netStatus.node_id ? ' (node: ' + netStatus.node_id.slice(0, 8) + '...)' : '';
+            updateStep(step1, '[1/3] Checking network status... ' + transportLabel + nodeLabel, 'success');
+            networkOk = true;
+        } catch (e) {
+            updateStep(step1, '[1/3] Checking network status... Network unavailable', 'error');
+        }
+
+        // Step 2: Connect to peer via Iroh
+        updateStep(step2, '[2/3] Connecting to peer... Searching via relay...', 'active');
+        try {
+            await Ephemera.rpc('network.connect', { node_id: pubkey });
+            updateStep(step2, '[2/3] Connecting to peer... Connected!', 'success');
+        } catch (e) {
+            console.warn('Network connect (may be offline):', e.message || e);
+            updateStep(step2, '[2/3] Connecting to peer... Peer not found (they may be offline)', 'error');
+        }
+
+        // Step 3: Send social connection request
+        updateStep(step3, '[3/3] Saving connection request...', 'active');
+        try {
+            await Ephemera.rpc('social.connect', {
+                target: pubkey,
+                message: message || 'Hi! I\'d like to connect.',
+            });
+            updateStep(step3, '[3/3] Connection request sent!', 'success');
+            Ephemera.showToast('Connection request sent!', 'success');
+        } catch (err) {
+            updateStep(step3, '[3/3] Failed to send request: ' + (err.message || err), 'error');
+            throw err;
+        }
+
+        // Auto-remove the progress panel after 5 seconds
+        setTimeout(function () {
+            if (stepsContainer.parentNode) {
+                stepsContainer.style.opacity = '0';
+                stepsContainer.style.transition = 'opacity 300ms ease-out';
+                setTimeout(function () {
+                    if (stepsContainer.parentNode) stepsContainer.remove();
+                }, 300);
+            }
+        }, 5000);
     }
 
     async function sendConnectionRequest(target) {
@@ -352,7 +477,7 @@
             if (!pubkey) return;
 
             await connectViaPubkey(pubkey);
-            Ephemera.showToast('Connection request sent!', 'success');
+            // connectViaPubkey already shows step-by-step toasts
         } catch (err) {
             Ephemera.showToast('Failed: ' + err.message, 'error');
         }

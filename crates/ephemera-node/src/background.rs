@@ -268,7 +268,8 @@ pub async fn dead_drop_poll_loop(
 }
 
 /// Retrieve dead drop records from the DHT for the given pubkey and store
-/// them in the local dead drop table.
+/// them in the local dead drop table. Also detects connection requests
+/// and inserts them into the social connections table.
 fn retrieve_dht_dead_drops(
     services: &ServiceContainer,
     pubkey: &ephemera_types::IdentityKey,
@@ -297,6 +298,47 @@ fn retrieve_dht_dead_drops(
             Ok(d) => d,
             Err(_) => return,
         };
+
+        // Check if this is a connection request (unencrypted JSON payload).
+        if let Ok(payload) = serde_json::from_slice::<serde_json::Value>(&envelope.sealed_data) {
+            if payload.get("type").and_then(|t| t.as_str()) == Some("connection_request") {
+                let initiator_hex = payload.get("initiator").and_then(|v| v.as_str()).unwrap_or("");
+                let message = payload.get("message").and_then(|v| v.as_str());
+                let created_at = payload.get("created_at").and_then(|v| v.as_i64()).unwrap_or(0);
+
+                if let Ok(initiator_bytes) = hex::decode(initiator_hex) {
+                    if initiator_bytes.len() == 32 {
+                        let local_bytes = pubkey.as_bytes().to_vec();
+                        let insert_result = db.conn().execute(
+                            "INSERT OR IGNORE INTO connections \
+                             (local_pubkey, remote_pubkey, status, created_at, updated_at, message, initiator_pubkey) \
+                             VALUES (?1, ?2, 'pending_incoming', ?3, ?3, ?4, ?2)",
+                            rusqlite::params![local_bytes, initiator_bytes, created_at, message],
+                        );
+                        match insert_result {
+                            Ok(rows) if rows > 0 => {
+                                tracing::info!(
+                                    from = %initiator_hex,
+                                    "DHT dead drop: received connection request"
+                                );
+                                // Emit event for frontend notification.
+                                let mut arr = [0u8; 32];
+                                arr.copy_from_slice(&initiator_bytes);
+                                services.event_bus.emit(Event::ConnectionRequestReceived {
+                                    from: ephemera_types::IdentityKey::from_bytes(arr),
+                                });
+                            }
+                            Ok(_) => {}
+                            Err(e) => {
+                                tracing::warn!(error = %e, "DHT dead drop: failed to insert connection request");
+                            }
+                        }
+                        // Don't store connection requests in the dead drop table.
+                        return;
+                    }
+                }
+            }
+        }
 
         let msg_id = ephemera_types::ContentId::from_digest(envelope.message_id);
         if let Err(e) = DeadDropService::deposit_raw(

@@ -5,6 +5,7 @@
 
 use ephemera_config::NodeConfig;
 use ephemera_node::api::build_router_with_network;
+use ephemera_node::debug_log::DebugLogHandle;
 use ephemera_node::rpc::Router;
 use ephemera_node::rpc_auth::RpcAuth;
 use ephemera_node::EphemeraNode;
@@ -30,22 +31,31 @@ impl AppState {
     ///
     /// Loads or creates configuration in `data_dir`, boots the embedded
     /// node, and builds the JSON-RPC router from the node's services.
+    /// The `debug_log` handle is wired into both the node and the router
+    /// so the in-app debug console can retrieve captured log entries.
     ///
     /// # Errors
     ///
     /// Returns an error if the node fails to initialize or start.
-    pub async fn initialize(data_dir: PathBuf) -> Result<Self, Box<dyn std::error::Error>> {
+    pub async fn initialize(
+        data_dir: PathBuf,
+        debug_log: DebugLogHandle,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let mut config = NodeConfig::load_or_create(&data_dir)?;
         // Default P2P listen address for the desktop client.
         if config.listen_addr.is_none() {
             config.listen_addr = Some("0.0.0.0:9100".parse().expect("valid addr"));
         }
 
-        let mut node = EphemeraNode::new(config)?;
+        let mut node = EphemeraNode::with_debug_log(config, debug_log.clone())?;
         node.start().await?;
 
         let network = node.network().cloned();
-        let router = build_router_with_network(Arc::clone(node.services()), network);
+        let router = build_router_with_network(
+            Arc::clone(node.services()),
+            network,
+            Some(debug_log),
+        );
         let rpc_auth = node.rpc_auth().clone();
 
         Ok(Self {

@@ -5,20 +5,30 @@
 
 use ephemera_client::state::AppState;
 use ephemera_config::NodeConfig;
+use ephemera_node::debug_log::{DebugLogHandle, DebugLogLayer};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 /// The default port for the local HTTP server.
 const DEFAULT_PORT: u16 = 3500;
 
 #[tokio::main]
 async fn main() {
-    // Initialize tracing
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
+    // Create the shared debug log handle BEFORE initializing tracing so
+    // every log line from startup onwards is captured for the debug console.
+    let debug_log = DebugLogHandle::new();
+
+    // Initialize tracing with BOTH the fmt layer (console output) and the
+    // DebugLogLayer (in-app ring buffer).
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+
+    tracing_subscriber::registry()
+        .with(env_filter)
+        .with(tracing_subscriber::fmt::layer())
+        .with(DebugLogLayer::new(debug_log.clone()))
         .init();
 
     tracing::info!("Ephemera v{}", env!("CARGO_PKG_VERSION"));
@@ -38,7 +48,7 @@ async fn main() {
     tracing::info!(data_dir = %data_dir.display(), "using data directory");
 
     // Initialize application state (boots the embedded node)
-    let state = match AppState::initialize(data_dir).await {
+    let state = match AppState::initialize(data_dir, debug_log).await {
         Ok(s) => Arc::new(s),
         Err(e) => {
             tracing::error!(error = %e, "failed to initialize ephemera node");

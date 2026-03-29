@@ -8,6 +8,7 @@
 pub mod api;
 pub mod background;
 pub mod background_dht;
+pub mod debug_log;
 pub mod gossip_ingest;
 pub mod message_ingest;
 pub mod network;
@@ -16,6 +17,7 @@ pub mod rpc_auth;
 pub mod services;
 pub mod startup;
 
+use debug_log::DebugLogHandle;
 use ephemera_config::NodeConfig;
 use ephemera_events::EventBus;
 use ephemera_types::NodeId;
@@ -38,6 +40,8 @@ pub struct EphemeraNode {
     rpc_auth: RpcAuth,
     /// Network subsystem (Iroh or TCP transport + gossip). Created on `start()`.
     network: Option<Arc<NetworkSubsystem>>,
+    /// In-memory debug log ring buffer for the in-app debug console.
+    debug_log: DebugLogHandle,
 }
 
 /// Process incoming tombstone messages from the moderation gossip topic.
@@ -138,7 +142,22 @@ async fn moderation_ingest_loop(
 impl EphemeraNode {
     /// Create a new node. Does **not** start networking or background tasks;
     /// call [`start`](Self::start) for that.
+    ///
+    /// The `debug_log` handle is shared with the tracing subscriber layer so
+    /// that log output is captured for the in-app debug console.  If you do
+    /// not need in-app log capture, pass [`DebugLogHandle::new()`].
     pub fn new(config: NodeConfig) -> Result<Self, StartupError> {
+        Self::with_debug_log(config, DebugLogHandle::new())
+    }
+
+    /// Create a new node with an explicit [`DebugLogHandle`].
+    ///
+    /// Use this variant when you want the same handle wired into the
+    /// tracing subscriber (desktop `main.rs`, Tauri `lib.rs`).
+    pub fn with_debug_log(
+        config: NodeConfig,
+        debug_log: DebugLogHandle,
+    ) -> Result<Self, StartupError> {
         startup::validate_config(&config)?;
 
         // Ensure data directory exists before writing the RPC token.
@@ -166,6 +185,7 @@ impl EphemeraNode {
             running: false,
             rpc_auth,
             network: None,
+            debug_log,
         })
     }
 
@@ -518,6 +538,12 @@ impl EphemeraNode {
     #[must_use]
     pub fn network(&self) -> Option<&Arc<NetworkSubsystem>> {
         self.network.as_ref()
+    }
+
+    /// Access the debug log handle for wiring into the RPC router.
+    #[must_use]
+    pub fn debug_log(&self) -> &DebugLogHandle {
+        &self.debug_log
     }
 
     /// Derive a `NodeId` from the identity (deterministic) or random bytes.

@@ -1,7 +1,10 @@
 //! JSON-RPC handlers for the `meta.*` namespace.
 //!
-//! Provides node status, capabilities listing, and transport tier switching.
+//! Provides node status, capabilities listing, transport tier switching,
+//! and the debug log endpoint for the in-app debug console.
 
+use crate::debug_log::DebugLogHandle;
+use crate::network::{NetworkSubsystem, TransportKind};
 use crate::rpc::{error_codes, JsonRpcError, Router};
 use crate::services::ServiceContainer;
 use serde_json::Value;
@@ -24,10 +27,16 @@ fn extract_str(params: &Value, key: &str) -> Result<String, JsonRpcError> {
 ///
 /// `method_names` is a pre-collected list of all registered method names
 /// (for the `meta.capabilities` response).
+///
+/// When `network` is `Some`, the debug log endpoint includes live network
+/// status. When `debug_log` is `Some`, the `meta.debug_log` endpoint serves
+/// captured log entries from the ring buffer.
 pub fn register_meta(
     router: &mut Router,
     services: &Arc<ServiceContainer>,
     method_names: Vec<String>,
+    network: Option<Arc<NetworkSubsystem>>,
+    debug_log: Option<DebugLogHandle>,
 ) {
     let caps = method_names;
     router.register("meta.capabilities", move |_params| {
@@ -68,5 +77,80 @@ pub fn register_meta(
         let _tier = extract_str(&params, "tier")?;
         // TODO: actually switch transport tier via TransportManager
         Ok(serde_json::json!({ "ok": true }))
+    });
+
+    // meta.debug_log — returns the last N log entries and network status.
+    //
+    // Parameters:
+    //   - count (optional, u64): number of log entries to return (default 50)
+    //
+    // Response:
+    //   { logs: [...], network_status: { transport, node_id, relay, peer_count, iroh_active } }
+    let net_for_debug = network;
+    let log_handle = debug_log;
+    router.register("meta.debug_log", move |params| {
+        let net = net_for_debug.clone();
+        let handle = log_handle.clone();
+        async move {
+            let count = params
+                .get("count")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(50) as usize;
+
+            // Collect log entries from the ring buffer.
+            let logs: Vec<Value> = match &handle {
+                Some(h) => h
+                    .read_last(count)
+                    .into_iter()
+                    .map(|entry| {
+                        serde_json::json!({
+                            "level": entry.level,
+                            "target": entry.target,
+                            "message": entry.message,
+                            "timestamp": entry.timestamp,
+                        })
+                    })
+                    .collect(),
+                None => vec![],
+            };
+
+            // Build network status from the live network subsystem.
+            let network_status = match &net {
+                Some(n) => {
+                    let kind = n.transport_kind();
+                    let transport_name = match kind {
+                        TransportKind::Tcp => "tcp",
+                        #[cfg(feature = "iroh-transport")]
+                        TransportKind::Iroh => "iroh",
+                    };
+                    let iroh_active = match kind {
+                        #[cfg(feature = "iroh-transport")]
+                        TransportKind::Iroh => true,
+                        _ => false,
+                    };
+                    serde_json::json!({
+                        "transport": transport_name,
+                        "node_id": n.local_id().to_string(),
+                        "relay": Value::Null,
+                        "peer_count": n.peer_count(),
+                        "iroh_active": iroh_active,
+                    })
+                }
+                None => {
+                    serde_json::json!({
+                        "transport": "none",
+                        "node_id": Value::Null,
+                        "relay": Value::Null,
+                        "peer_count": 0,
+                        "iroh_active": false,
+                    })
+                }
+            };
+
+            Ok(serde_json::json!({
+                "logs": logs,
+                "network_status": network_status,
+            }))
+        }
     });
 }

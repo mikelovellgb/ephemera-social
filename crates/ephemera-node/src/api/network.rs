@@ -184,6 +184,33 @@ pub fn register_network(router: &mut Router, network: &Arc<NetworkSubsystem>) {
             Ok(serde_json::json!({ "ok": true, "peer_id": peer_id_hex }))
         }
     });
+
+    // network.status() -- comprehensive diagnostic: transport, node_id,
+    // peer_count, iroh availability, and any error.
+    let net = Arc::clone(network);
+    router.register("network.status", move |_params| {
+        let net = Arc::clone(&net);
+        async move {
+            let kind = net.transport_kind();
+            let transport_name = match kind {
+                TransportKind::Tcp => "tcp",
+                #[cfg(feature = "iroh-transport")]
+                TransportKind::Iroh => "iroh",
+            };
+            let iroh_available = match kind {
+                #[cfg(feature = "iroh-transport")]
+                TransportKind::Iroh => true,
+                _ => false,
+            };
+            Ok(serde_json::json!({
+                "transport": transport_name,
+                "node_id": net.local_id().to_string(),
+                "peer_count": net.peer_count(),
+                "iroh_available": iroh_available,
+                "error": Value::Null,
+            }))
+        }
+    });
 }
 
 /// Register stub `network.*` methods that return a descriptive error.
@@ -212,5 +239,19 @@ pub fn register_network_stubs(router: &mut Router) {
 
     router.register("network.disconnect", move |_params| {
         async move { Err::<Value, _>(unavailable()) }
+    });
+
+    // network.status returns a valid response even when the network is down,
+    // so the frontend can always show diagnostic info.
+    router.register("network.status", move |_params| {
+        async move {
+            Ok(serde_json::json!({
+                "transport": "none",
+                "node_id": Value::Null,
+                "peer_count": 0,
+                "iroh_available": false,
+                "error": "network subsystem not available — unlock identity and restart node",
+            }))
+        }
     });
 }
