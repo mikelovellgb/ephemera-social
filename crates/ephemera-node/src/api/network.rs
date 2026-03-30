@@ -292,6 +292,7 @@ pub fn register_network_dynamic(router: &mut Router, services: &Arc<ServiceConta
             match &*guard {
                 Some(net) => {
                     let kind = net.transport_kind();
+                    tracing::debug!(?kind, "network.status: reporting transport kind");
                     let transport_name = match kind {
                         TransportKind::Tcp => "tcp",
                         #[cfg(feature = "iroh-transport")]
