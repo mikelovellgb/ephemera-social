@@ -16,18 +16,18 @@ use std::sync::Arc;
 /// Build a fully-wired JSON-RPC router with all API methods registered.
 ///
 /// The returned [`Router`] is ready to dispatch incoming requests.
-/// If `net` is `Some`, the `network.*` namespace methods are also registered.
 pub fn build_router(services: Arc<ServiceContainer>) -> Router {
-    build_router_with_network(services, None, None)
+    build_router_with_network(services, None)
 }
 
-/// Build a router that includes `network.*` methods when a network is provided.
+/// Build a router that includes `network.*` methods.
 ///
+/// All network status reads go through `services.network` (the Mutex) so
+/// handlers always see the current subsystem after a TCP-to-Iroh upgrade.
 /// When `debug_log` is `Some`, the `meta.debug_log` endpoint is registered so
 /// the frontend debug console can fetch captured log entries and network status.
 pub fn build_router_with_network(
     services: Arc<ServiceContainer>,
-    net: Option<Arc<crate::network::NetworkSubsystem>>,
     debug_log: Option<DebugLogHandle>,
 ) -> Router {
     let mut router = Router::new();
@@ -80,7 +80,7 @@ pub fn build_router_with_network(
         }
     }
     method_names.sort();
-    meta::register_meta(&mut router, &services, method_names, net.clone(), debug_log);
+    meta::register_meta(&mut router, &services, method_names, debug_log);
 
     router
 }

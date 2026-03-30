@@ -47,14 +47,17 @@ async fn test_connect_to_remote_peer_via_rpc() {
     let mut node = EphemeraNode::new(config).unwrap();
     node.start().await.unwrap();
 
-    // Build the router with network support.
+    // Build the router with network support. The network is set on the
+    // ServiceContainer so dynamic handlers read from services.network (Mutex).
     let services = Arc::new({
         let cfg = node.config().clone();
         let event_bus = node.event_bus().clone();
         ephemera_node::services::ServiceContainer::new(&cfg, event_bus).unwrap()
     });
-    let network = node.network().cloned();
-    let router = build_router_with_network(services, network);
+    if let Some(net) = node.network().cloned() {
+        services.set_network(net);
+    }
+    let router = build_router_with_network(services, None);
 
     // Call network.connect RPC.
     let req = make_request(
@@ -145,14 +148,17 @@ async fn test_peers_rpc_lists_connected() {
     // Wait for bootstrap connection.
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-    // Build the router with network support.
+    // Build the router with network support. The network is set on the
+    // ServiceContainer so dynamic handlers read from services.network (Mutex).
     let services = Arc::new({
         let cfg = node.config().clone();
         let event_bus = node.event_bus().clone();
         ephemera_node::services::ServiceContainer::new(&cfg, event_bus).unwrap()
     });
-    let network = node.network().cloned();
-    let router = build_router_with_network(services, network);
+    if let Some(net) = node.network().cloned() {
+        services.set_network(net);
+    }
+    let router = build_router_with_network(services, None);
 
     // Call network.peers RPC.
     let req = make_request("network.peers", serde_json::json!({}));

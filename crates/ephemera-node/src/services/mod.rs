@@ -34,6 +34,7 @@ use ephemera_social::HandleRegistry;
 use ephemera_store::{ContentStore, GarbageCollector, MetadataDb};
 use ephemera_types::{IdentityKey, NodeId};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Instant;
 
@@ -83,6 +84,20 @@ pub struct ServiceContainer {
     /// Network subsystem reference, set after `EphemeraNode::start()`.
     /// Used by services that need to publish to gossip (e.g. message delivery).
     pub network: Mutex<Option<std::sync::Arc<crate::network::NetworkSubsystem>>>,
+    /// Path to the content blob store directory (needed to re-open stores
+    /// when re-spawning gossip ingest loops after a network upgrade).
+    content_path: PathBuf,
+    /// Path to the SQLite metadata database (needed to open fresh connections
+    /// for re-spawned ingest loops).
+    metadata_db_path: PathBuf,
+    /// Shutdown signal sender. Cloned from `EphemeraNode` after `start()` so
+    /// that `upgrade_network_to_iroh()` can hand shutdown receivers to newly
+    /// spawned ingest loops.
+    shutdown_tx: Mutex<Option<tokio::sync::watch::Sender<bool>>>,
+    /// JoinHandles for the gossip ingest loops (public_feed, dm_delivery,
+    /// moderation). Stored so they can be aborted when the network is
+    /// upgraded from TCP to Iroh and new loops must be spawned.
+    ingest_handles: Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
 
 impl ServiceContainer {
@@ -181,6 +196,10 @@ impl ServiceContainer {
             dht_routing: Mutex::new(dht_routing),
             dht_config,
             network: Mutex::new(None),
+            content_path,
+            metadata_db_path,
+            shutdown_tx: Mutex::new(None),
+            ingest_handles: Mutex::new(Vec::new()),
         })
     }
 
@@ -192,11 +211,34 @@ impl ServiceContainer {
         }
     }
 
+    /// Store the shutdown signal sender so that `upgrade_network_to_iroh()`
+    /// can subscribe new ingest loops to the shutdown signal.
+    pub fn set_shutdown_tx(&self, tx: tokio::sync::watch::Sender<bool>) {
+        if let Ok(mut guard) = self.shutdown_tx.lock() {
+            *guard = Some(tx);
+        }
+    }
+
+    /// Store the JoinHandles for the initial gossip ingest loops so they
+    /// can be aborted when the network is upgraded from TCP to Iroh.
+    pub fn store_ingest_handles(&self, handles: Vec<tokio::task::JoinHandle<()>>) {
+        if let Ok(mut guard) = self.ingest_handles.lock() {
+            *guard = handles;
+        }
+    }
+
     /// Attempt to upgrade the network transport from TCP to Iroh after the
     /// identity is unlocked. This is critical because at boot time the
     /// identity is typically locked, so the node starts with TCP fallback.
     /// Once the user unlocks their identity, we can derive the Iroh secret
     /// key and create a proper Iroh transport with NAT traversal.
+    ///
+    /// After creating the new Iroh network, this method:
+    /// 1. Aborts the old ingest loop tasks (they hold subscriptions to the
+    ///    dead TCP gossip service and would never receive messages).
+    /// 2. Subscribes to all three gossip topics on the NEW network.
+    /// 3. Spawns fresh ingest loops for each subscription.
+    /// 4. Stores the new network in the Mutex (dropping the old TCP one).
     ///
     /// Returns `Ok(true)` if the network was upgraded, `Ok(false)` if
     /// already using Iroh or no upgrade was needed.
@@ -232,11 +274,133 @@ impl ServiceContainer {
             "upgraded network transport from TCP to Iroh"
         );
 
-        // Replace the network subsystem.
+        // --- Abort old ingest loops ---
+        // The old loops hold subscriptions to the dead TCP gossip service.
+        // They must be aborted before we spawn replacements.
+        if let Ok(mut handles) = self.ingest_handles.lock() {
+            for h in handles.drain(..) {
+                h.abort();
+            }
+            tracing::debug!("aborted old gossip ingest loops");
+        }
+
+        // --- Subscribe to gossip topics on the NEW network ---
+        let feed_sub = new_net
+            .subscribe_public_feed()
+            .await
+            .map_err(|e| format!("subscribe public_feed on new network: {e}"))?;
+
+        let dm_topic = ephemera_gossip::GossipTopic::direct_messages();
+        let dm_sub = new_net
+            .subscribe(&dm_topic)
+            .await
+            .map_err(|e| format!("subscribe dm_delivery on new network: {e}"))?;
+
+        let mod_topic = ephemera_gossip::GossipTopic::moderation();
+        let mod_sub = new_net
+            .subscribe(&mod_topic)
+            .await
+            .map_err(|e| format!("subscribe moderation on new network: {e}"))?;
+
+        // --- Get shutdown receivers ---
+        let shutdown_tx = self
+            .shutdown_tx
+            .lock()
+            .map_err(|e| format!("lock shutdown_tx: {e}"))?
+            .clone()
+            .ok_or("shutdown_tx not set — node not started")?;
+
+        // --- Spawn fresh ingest loops ---
+        let mut new_handles = Vec::with_capacity(3);
+
+        // 1. Public feed ingest
+        {
+            let content_store = ContentStore::open(&self.content_path)
+                .map_err(|e| format!("reopen content store: {e}"))?;
+            let metadata_db = MetadataDb::open(&self.metadata_db_path)
+                .map_err(|e| format!("reopen metadata db for feed ingest: {e}"))?;
+            let metadata_db = std::sync::Mutex::new(metadata_db);
+            let event_bus = self.event_bus.clone();
+            let rate_limiter = std::sync::Mutex::new(RateLimiter::new());
+            let fingerprint_store = std::sync::Mutex::new(FingerprintStore::new());
+            let content_filter = std::sync::Mutex::new(ContentFilter::empty());
+            let shutdown_rx = shutdown_tx.subscribe();
+
+            let h = tokio::spawn(async move {
+                crate::gossip_ingest::gossip_ingest_loop(
+                    feed_sub,
+                    content_store,
+                    metadata_db,
+                    event_bus,
+                    rate_limiter,
+                    fingerprint_store,
+                    content_filter,
+                    shutdown_rx,
+                )
+                .await;
+            });
+            new_handles.push(h);
+            tracing::info!("re-spawned gossip ingest loop on new Iroh network");
+        }
+
+        // 2. DM (message) ingest
+        {
+            let dm_metadata_db = MetadataDb::open(&self.metadata_db_path)
+                .map_err(|e| format!("reopen metadata db for dm ingest: {e}"))?;
+            let dm_metadata_db = std::sync::Mutex::new(dm_metadata_db);
+            let dm_event_bus = self.event_bus.clone();
+            let dm_shutdown_rx = shutdown_tx.subscribe();
+            let our_pubkey = self
+                .identity
+                .get_signing_keypair()
+                .ok()
+                .map(|kp| kp.public_key());
+
+            let h = tokio::spawn(async move {
+                crate::message_ingest::message_ingest_loop(
+                    dm_sub,
+                    dm_metadata_db,
+                    dm_event_bus,
+                    our_pubkey,
+                    dm_shutdown_rx,
+                )
+                .await;
+            });
+            new_handles.push(h);
+            tracing::info!("re-spawned message ingest loop on new Iroh network");
+        }
+
+        // 3. Moderation ingest
+        {
+            let mod_metadata_db = MetadataDb::open(&self.metadata_db_path)
+                .map_err(|e| format!("reopen metadata db for moderation ingest: {e}"))?;
+            let mod_metadata_db = std::sync::Mutex::new(mod_metadata_db);
+            let mod_content_store = ContentStore::open(&self.content_path)
+                .map_err(|e| format!("reopen content store for moderation ingest: {e}"))?;
+            let mod_shutdown_rx = shutdown_tx.subscribe();
+
+            let h = tokio::spawn(async move {
+                crate::moderation_ingest_loop(
+                    mod_sub,
+                    mod_metadata_db,
+                    mod_content_store,
+                    mod_shutdown_rx,
+                )
+                .await;
+            });
+            new_handles.push(h);
+            tracing::info!("re-spawned moderation ingest loop on new Iroh network");
+        }
+
+        // Store the new handles.
+        if let Ok(mut guard) = self.ingest_handles.lock() {
+            *guard = new_handles;
+        }
+
+        // Replace the network subsystem. The old TCP transport and its
+        // dead gossip subscriptions get dropped when the Arc refcount hits 0.
         if let Ok(mut guard) = self.network.lock() {
-            // Shut down the old TCP transport.
             if guard.is_some() {
-                // The old network subsystem will be dropped when the Arc refcount hits zero.
                 tracing::debug!("replacing old TCP network subsystem");
             }
             *guard = Some(new_net);

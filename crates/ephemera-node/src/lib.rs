@@ -256,6 +256,11 @@ impl EphemeraNode {
         // Make the network available to services (e.g. message delivery via gossip).
         self.services.set_network(Arc::clone(&network));
 
+        // Store the shutdown sender in ServiceContainer so that
+        // upgrade_network_to_iroh() can create new shutdown receivers
+        // for re-spawned ingest loops.
+        self.services.set_shutdown_tx(self.shutdown.clone());
+
         // 1b. Connect to bootstrap nodes from config
         for addr in &self.config.bootstrap_nodes {
             let peer_addr = ephemera_transport::PeerAddr {
@@ -267,6 +272,11 @@ impl EphemeraNode {
                 Err(e) => tracing::warn!(%addr, error = %e, "failed to connect to bootstrap node"),
             }
         }
+
+        // Collect ingest loop JoinHandles so they can be aborted on network
+        // upgrade (TCP -> Iroh). The new Iroh network will re-spawn them
+        // with fresh gossip subscriptions.
+        let mut ingest_handles: Vec<tokio::task::JoinHandle<()>> = Vec::with_capacity(3);
 
         // 2. Spawn gossip ingest loop (gap 1.6)
         {
@@ -301,7 +311,7 @@ impl EphemeraNode {
                 std::sync::Mutex::new(ephemera_mod::ContentFilter::empty());
             let shutdown_rx = self.shutdown.subscribe();
 
-            tokio::spawn(async move {
+            let h = tokio::spawn(async move {
                 gossip_ingest::gossip_ingest_loop(
                     subscription,
                     content_store,
@@ -314,6 +324,7 @@ impl EphemeraNode {
                 )
                 .await;
             });
+            ingest_handles.push(h);
             tracing::info!("spawned gossip ingest loop");
         }
 
@@ -348,7 +359,7 @@ impl EphemeraNode {
                 .ok()
                 .map(|kp| kp.public_key());
 
-            tokio::spawn(async move {
+            let h = tokio::spawn(async move {
                 message_ingest::message_ingest_loop(
                     dm_subscription,
                     dm_metadata_db,
@@ -358,6 +369,7 @@ impl EphemeraNode {
                 )
                 .await;
             });
+            ingest_handles.push(h);
             tracing::info!("spawned message ingest loop (dm_delivery)");
         }
 
@@ -391,7 +403,7 @@ impl EphemeraNode {
             };
             let mod_shutdown_rx = self.shutdown.subscribe();
 
-            tokio::spawn(async move {
+            let h = tokio::spawn(async move {
                 moderation_ingest_loop(
                     mod_subscription,
                     mod_metadata_db,
@@ -400,8 +412,12 @@ impl EphemeraNode {
                 )
                 .await;
             });
+            ingest_handles.push(h);
             tracing::info!("spawned moderation ingest loop (tombstones)");
         }
+
+        // Store ingest handles so upgrade_network_to_iroh() can abort them.
+        self.services.store_ingest_handles(ingest_handles);
 
         // 3. GC background task
         {

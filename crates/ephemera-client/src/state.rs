@@ -50,10 +50,8 @@ impl AppState {
         let mut node = EphemeraNode::with_debug_log(config, debug_log.clone())?;
         node.start().await?;
 
-        let network = node.network().cloned();
         let router = build_router_with_network(
             Arc::clone(node.services()),
-            network,
             Some(debug_log),
         );
         let rpc_auth = node.rpc_auth().clone();

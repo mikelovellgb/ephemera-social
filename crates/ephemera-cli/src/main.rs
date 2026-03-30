@@ -116,8 +116,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             ephemera_node::services::ServiceContainer::new(&cfg, event_bus)?
         },
     );
-    let network = node.network().cloned();
-    let router = build_router_with_network(services, network, None);
+    let router = build_router_with_network(services, None);
 
     // Dispatch the CLI command as a JSON-RPC call.
     let response = match cli.command {
