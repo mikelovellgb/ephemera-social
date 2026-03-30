@@ -56,8 +56,13 @@ pub fn register_social(router: &mut Router, services: &Arc<ServiceContainer>) {
         let svc = Arc::clone(&svc);
         async move {
             let from = extract_str(&params, "from")?;
+            let net_arc = {
+                let guard = svc.network.lock().map_err(|e| internal_error(format!("lock: {e}")))?;
+                guard.clone()
+            };
+            let net_ref = net_arc.as_deref();
             svc.social
-                .accept(&from, &svc.identity)
+                .accept(&from, &svc.identity, net_ref, Some(&svc.dht_storage))
                 .await
                 .map_err(internal_error)
         }

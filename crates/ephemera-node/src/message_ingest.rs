@@ -136,13 +136,16 @@ pub async fn message_ingest_loop(
                     }
                 }
 
-                // If addressed to us, check if it's a connection request.
-                // Connection request payloads are JSON with type: "connection_request"
-                // (NOT encrypted, unlike DM messages).
+                // If addressed to us, check if it's a connection request or acceptance.
+                // These payloads are JSON with type: "connection_request" or
+                // "connection_accepted" (NOT encrypted, unlike DM messages).
                 let mut is_connection_request = false;
+                let mut is_connection_accepted = false;
                 if is_for_us {
                     if let Ok(payload) = serde_json::from_slice::<serde_json::Value>(&envelope.sealed_data) {
-                        if payload.get("type").and_then(|t| t.as_str()) == Some("connection_request") {
+                        let payload_type = payload.get("type").and_then(|t| t.as_str());
+
+                        if payload_type == Some("connection_request") {
                             is_connection_request = true;
                             // Extract initiator and responder pubkeys.
                             let initiator_hex = payload.get("initiator").and_then(|v| v.as_str()).unwrap_or("");
@@ -181,6 +184,42 @@ pub async fn message_ingest_loop(
                                     }
                                 }
                             }
+                        } else if payload_type == Some("connection_accepted") {
+                            is_connection_accepted = true;
+                            let acceptor_hex = payload.get("acceptor").and_then(|v| v.as_str()).unwrap_or("");
+                            let accepted_at = payload.get("created_at").and_then(|v| v.as_i64()).unwrap_or(now as i64);
+
+                            if let (Ok(acceptor_bytes), Some(ref pk)) = (hex::decode(acceptor_hex), &our_pubkey) {
+                                if acceptor_bytes.len() == 32 {
+                                    let local_bytes = pk.as_bytes().to_vec();
+                                    // Update our pending_outgoing to connected.
+                                    let update_result = db.conn().execute(
+                                        "UPDATE connections SET status = 'connected', updated_at = ?3 \
+                                         WHERE local_pubkey = ?1 AND remote_pubkey = ?2 AND status = 'pending_outgoing'",
+                                        rusqlite::params![local_bytes, acceptor_bytes, accepted_at],
+                                    );
+                                    match update_result {
+                                        Ok(rows) if rows > 0 => {
+                                            tracing::info!(
+                                                from = %acceptor_hex,
+                                                "message ingest: connection accepted, updated to connected"
+                                            );
+                                        }
+                                        Ok(_) => {
+                                            tracing::debug!(
+                                                from = %acceptor_hex,
+                                                "message ingest: connection acceptance received but no pending_outgoing row found"
+                                            );
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                error = %e,
+                                                "message ingest: failed to update connection to connected"
+                                            );
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -188,8 +227,10 @@ pub async fn message_ingest_loop(
                 // Drop the DB lock before emitting events.
                 drop(db);
 
-                // If addressed to us and it's a connection request, emit ConnectionRequestReceived.
-                // For regular messages, emit MessageReceived.
+                // If addressed to us, emit the appropriate event:
+                // - connection_request -> ConnectionRequestReceived
+                // - connection_accepted -> ConnectionEstablished
+                // - regular message -> MessageReceived
                 if is_for_us {
                     if is_connection_request {
                         if let Ok(payload) = serde_json::from_slice::<serde_json::Value>(&envelope.sealed_data) {
@@ -201,6 +242,20 @@ pub async fn message_ingest_loop(
                                     let from_key = IdentityKey::from_bytes(arr);
                                     event_bus.emit(Event::ConnectionRequestReceived {
                                         from: from_key,
+                                    });
+                                }
+                            }
+                        }
+                    } else if is_connection_accepted {
+                        if let Ok(payload) = serde_json::from_slice::<serde_json::Value>(&envelope.sealed_data) {
+                            let acceptor_hex = payload.get("acceptor").and_then(|v| v.as_str()).unwrap_or("");
+                            if let Ok(acc_bytes) = hex::decode(acceptor_hex) {
+                                if acc_bytes.len() == 32 {
+                                    let mut arr = [0u8; 32];
+                                    arr.copy_from_slice(&acc_bytes);
+                                    let peer_key = IdentityKey::from_bytes(arr);
+                                    event_bus.emit(Event::ConnectionEstablished {
+                                        peer: peer_key,
                                     });
                                 }
                             }

@@ -483,7 +483,19 @@
         }
     }
 
+    // Track the polling interval so we can clear it when navigating away.
+    var _discoverPollTimer = null;
+
+    function stopDiscoverPolling() {
+        if (_discoverPollTimer) {
+            clearInterval(_discoverPollTimer);
+            _discoverPollTimer = null;
+        }
+    }
+
     async function renderDiscover(container) {
+        // Stop any previous polling interval (e.g. when re-rendering).
+        stopDiscoverPolling();
         container.innerHTML = '';
 
         // Header
@@ -651,6 +663,30 @@
                 card.style.display = text.indexOf(query) !== -1 ? '' : 'none';
             });
         });
+
+        // Poll connections every 10 seconds to detect status changes
+        // (e.g. pending_outgoing -> connected when the other side accepts).
+        // Only re-render if a status actually changed.
+        var lastConnectionSnapshot = JSON.stringify(connections);
+        _discoverPollTimer = setInterval(async function () {
+            // Skip if we navigated away from the discover view.
+            if (!container.parentNode) {
+                stopDiscoverPolling();
+                return;
+            }
+            try {
+                var freshResult = await Ephemera.rpc('social.list_connections', { status: 'all' });
+                var freshConns = freshResult.connections || freshResult || [];
+                var freshSnapshot = JSON.stringify(freshConns);
+                if (freshSnapshot !== lastConnectionSnapshot) {
+                    lastConnectionSnapshot = freshSnapshot;
+                    // Re-render the discover view to reflect updated statuses.
+                    renderDiscover(container);
+                }
+            } catch (_e) {
+                // Silently ignore poll failures (network offline, etc.)
+            }
+        }, 10000);
     }
 
     // ================================================================
@@ -748,4 +784,9 @@
     }
 
     Ephemera.registerRoute('/discover', renderDiscover);
+
+    // Clean up polling when navigating away from discover.
+    if (typeof Ephemera.onNavigateAway === 'function') {
+        Ephemera.onNavigateAway('/discover', stopDiscoverPolling);
+    }
 })();

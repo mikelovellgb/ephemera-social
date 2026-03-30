@@ -299,9 +299,11 @@ fn retrieve_dht_dead_drops(
             Err(_) => return,
         };
 
-        // Check if this is a connection request (unencrypted JSON payload).
+        // Check if this is a connection request or acceptance (unencrypted JSON payload).
         if let Ok(payload) = serde_json::from_slice::<serde_json::Value>(&envelope.sealed_data) {
-            if payload.get("type").and_then(|t| t.as_str()) == Some("connection_request") {
+            let payload_type = payload.get("type").and_then(|t| t.as_str());
+
+            if payload_type == Some("connection_request") {
                 let initiator_hex = payload.get("initiator").and_then(|v| v.as_str()).unwrap_or("");
                 let message = payload.get("message").and_then(|v| v.as_str());
                 let created_at = payload.get("created_at").and_then(|v| v.as_i64()).unwrap_or(0);
@@ -334,6 +336,45 @@ fn retrieve_dht_dead_drops(
                             }
                         }
                         // Don't store connection requests in the dead drop table.
+                        return;
+                    }
+                }
+            } else if payload_type == Some("connection_accepted") {
+                let acceptor_hex = payload.get("acceptor").and_then(|v| v.as_str()).unwrap_or("");
+                let accepted_at = payload.get("created_at").and_then(|v| v.as_i64()).unwrap_or(0);
+
+                if let Ok(acceptor_bytes) = hex::decode(acceptor_hex) {
+                    if acceptor_bytes.len() == 32 {
+                        let local_bytes = pubkey.as_bytes().to_vec();
+                        // Update our pending_outgoing to connected.
+                        let update_result = db.conn().execute(
+                            "UPDATE connections SET status = 'connected', updated_at = ?3 \
+                             WHERE local_pubkey = ?1 AND remote_pubkey = ?2 AND status = 'pending_outgoing'",
+                            rusqlite::params![local_bytes, acceptor_bytes, accepted_at],
+                        );
+                        match update_result {
+                            Ok(rows) if rows > 0 => {
+                                tracing::info!(
+                                    from = %acceptor_hex,
+                                    "DHT dead drop: connection accepted, updated to connected"
+                                );
+                                let mut arr = [0u8; 32];
+                                arr.copy_from_slice(&acceptor_bytes);
+                                services.event_bus.emit(Event::ConnectionEstablished {
+                                    peer: ephemera_types::IdentityKey::from_bytes(arr),
+                                });
+                            }
+                            Ok(_) => {
+                                tracing::debug!(
+                                    from = %acceptor_hex,
+                                    "DHT dead drop: connection acceptance but no pending_outgoing row found"
+                                );
+                            }
+                            Err(e) => {
+                                tracing::warn!(error = %e, "DHT dead drop: failed to update connection to connected");
+                            }
+                        }
+                        // Don't store acceptances in the dead drop table.
                         return;
                     }
                 }

@@ -260,7 +260,18 @@ impl SocialService {
     }
 
     /// Accept a pending incoming connection request.
-    pub async fn accept(&self, from: &str, identity: &IdentityService) -> Result<Value, String> {
+    ///
+    /// After updating the local DB, publishes a `connection_accepted`
+    /// envelope to gossip + DHT so the requester (who may be on another
+    /// device/node) can discover the acceptance and flip their local
+    /// `pending_outgoing` row to `connected`.
+    pub async fn accept(
+        &self,
+        from: &str,
+        identity: &IdentityService,
+        network: Option<&crate::network::NetworkSubsystem>,
+        dht_storage: Option<&Mutex<DhtStorage>>,
+    ) -> Result<Value, String> {
         let local = get_local_identity(identity)?;
         let remote = parse_pubkey(from)?;
         let conn = self
@@ -268,7 +279,84 @@ impl SocialService {
             .accept(&local, &remote)
             .await
             .map_err(|e| format!("accept connection: {e}"))?;
-        Ok(connection_to_json(&conn, Some(&local), None))
+
+        // Notify the requester that we accepted via gossip + DHT.
+        let now = now_secs();
+        let acceptance_payload = serde_json::json!({
+            "type": "connection_accepted",
+            "acceptor": hex::encode(local.as_bytes()),
+            "requester": hex::encode(remote.as_bytes()),
+            "created_at": now,
+        });
+        let payload_bytes = serde_json::to_vec(&acceptance_payload)
+            .map_err(|e| format!("serialize acceptance: {e}"))?;
+
+        let mailbox_key = DeadDropService::mailbox_key(&remote);
+        let acc_hash = blake3::hash(&payload_bytes);
+        let acc_content_id = ContentId::from_digest(*acc_hash.as_bytes());
+        let expires_at = now + 7 * 24 * 60 * 60; // 7-day TTL
+
+        // Publish to gossip.
+        let mut published_gossip = false;
+        if let Some(net) = network {
+            let dm_topic = ephemera_gossip::GossipTopic::direct_messages();
+            let envelope = DeadDropEnvelope {
+                mailbox_key: *mailbox_key.hash_bytes(),
+                message_id: *acc_content_id.hash_bytes(),
+                sealed_data: payload_bytes.clone(),
+                deposited_at: now,
+                expires_at,
+            };
+            if let Ok(env_bytes) = serde_json::to_vec(&envelope) {
+                match net.publish(&dm_topic, env_bytes).await {
+                    Ok(()) => {
+                        published_gossip = true;
+                        tracing::info!(
+                            target = hex::encode(remote.as_bytes()),
+                            "published connection acceptance to gossip"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "failed to publish connection acceptance to gossip");
+                    }
+                }
+            }
+        }
+
+        // Publish to DHT for offline discovery.
+        let mut published_dht = false;
+        if let Some(dht) = dht_storage {
+            if let Ok(mut storage) = dht.lock() {
+                let dht_record = ephemera_dht::DhtRecord {
+                    key: *mailbox_key.hash_bytes(),
+                    record_type: ephemera_dht::DhtRecordType::DeadDrop,
+                    value: payload_bytes,
+                    publisher: *local.as_bytes(),
+                    timestamp: now,
+                    ttl_seconds: (7 * 24 * 60 * 60) as u32,
+                    signature: vec![], // unsigned for PoC
+                };
+                match storage.put(dht_record) {
+                    Ok(()) => {
+                        published_dht = true;
+                        tracing::info!(
+                            target = hex::encode(remote.as_bytes()),
+                            "published connection acceptance to DHT"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "failed to publish connection acceptance to DHT");
+                    }
+                }
+            }
+        }
+
+        let mut result = connection_to_json(&conn, Some(&local), None);
+        if let Some(obj) = result.as_object_mut() {
+            obj.insert("published_gossip".to_string(), serde_json::json!(published_gossip));
+            obj.insert("published_dht".to_string(), serde_json::json!(published_dht));
+        }
+        Ok(result)
     }
 
     /// Reject a pending incoming connection request.
@@ -319,12 +407,45 @@ impl SocialService {
         let remote = parse_pubkey(target)?;
 
         // Remove the stale pending_outgoing row (best-effort).
-        let _ = self.social_services.reject(&local, &remote).await;
+        match self.social_services.reject(&local, &remote).await {
+            Ok(()) => {
+                tracing::info!(
+                    target = %target,
+                    "resend_request: deleted old pending_outgoing row"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target = %target,
+                    error = %e,
+                    "resend_request: failed to delete old row (may not exist), proceeding"
+                );
+            }
+        }
+
+        // Also remove from the other direction in case the remote side
+        // previously rejected and we have a stale row.
+        let _ = self.social_services.reject(&remote, &local).await;
 
         // Re-issue the connection request through the normal path, which
         // stores a fresh row and publishes to gossip + DHT.
-        self.connect(target, msg, identity, network, dht_storage)
-            .await
+        match self.connect(target, msg, identity, network, dht_storage).await {
+            Ok(result) => {
+                tracing::info!(
+                    target = %target,
+                    "resend_request: successfully re-issued connection request"
+                );
+                Ok(result)
+            }
+            Err(e) => {
+                tracing::error!(
+                    target = %target,
+                    error = %e,
+                    "resend_request: failed to re-issue connection request"
+                );
+                Err(e)
+            }
+        }
     }
 
     /// Remove (disconnect from) an existing connection.
