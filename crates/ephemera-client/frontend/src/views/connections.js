@@ -245,6 +245,22 @@
                 container.appendChild(activeList);
             }
 
+            // Groups link at the bottom of the connections list
+            var groupsSection = Ephemera.el('div', 'groups-link-section');
+            groupsSection.style.marginTop = '1.5rem';
+            groupsSection.style.paddingTop = '1rem';
+            groupsSection.style.borderTop = '1px solid var(--border, rgba(255,255,255,0.08))';
+            var groupsBtn = Ephemera.el('button', 'btn btn-ghost', 'View Groups');
+            groupsBtn.style.width = '100%';
+            groupsBtn.innerHTML =
+                '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:middle;margin-right:8px;">' +
+                '<path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/>' +
+                '<path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>' +
+                '<span style="vertical-align:middle;">Groups</span>';
+            groupsBtn.addEventListener('click', function () { Ephemera.navigate('/groups'); });
+            groupsSection.appendChild(groupsBtn);
+            container.appendChild(groupsSection);
+
             // Empty state
             if (incoming.length === 0 && outgoing.length === 0 && active.length === 0) {
                 var empty = Ephemera.el('div', 'empty-state');

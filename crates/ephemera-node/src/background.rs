@@ -245,14 +245,33 @@ pub async fn dead_drop_poll_loop(
                             count = pending.len(),
                             "dead drop: found pending messages"
                         );
-                        // Emit events for each pending message so the frontend
-                        // can display a notification badge.
+                        // Emit events and acknowledge each pending message so
+                        // it is removed from the dead drop table.
                         for pm in &pending {
                             let msg_id_hex = hex::encode(pm.id.hash_bytes());
+                            tracing::info!(
+                                message_id = %msg_id_hex,
+                                "dead drop: processing message"
+                            );
                             services.event_bus.emit(Event::MessageReceived {
                                 from: pubkey,
-                                message_id: msg_id_hex,
+                                message_id: msg_id_hex.clone(),
                             });
+                            match DeadDropService::acknowledge(&db, &pm.id) {
+                                Ok(()) => {
+                                    tracing::info!(
+                                        message_id = %msg_id_hex,
+                                        "dead drop: acknowledged message"
+                                    );
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        message_id = %msg_id_hex,
+                                        error = %e,
+                                        "dead drop: failed to acknowledge message"
+                                    );
+                                }
+                            }
                         }
                     }
                     Ok(_) => {}
@@ -274,6 +293,10 @@ pub async fn dead_drop_poll_loop(
 /// Retrieve dead drop records from the DHT for the given pubkey and store
 /// them in the local dead drop table. Also detects connection requests
 /// and inserts them into the social connections table.
+///
+/// After successfully processing a DHT dead drop record (connection request,
+/// connection acceptance, or regular message), the record is removed from the
+/// DHT so it does not reappear on subsequent polls.
 fn retrieve_dht_dead_drops(
     services: &ServiceContainer,
     pubkey: &ephemera_types::IdentityKey,
@@ -288,123 +311,142 @@ fn retrieve_dht_dead_drops(
         Err(_) => return,
     };
 
-    if let Some(record) = dht_storage.get(&dht_key) {
-        // Deserialize the DHT record value as a DeadDropEnvelope.
-        let envelope: DeadDropEnvelope = match serde_json::from_slice(&record.value) {
-            Ok(e) => e,
-            Err(_) => return,
-        };
+    let record = match dht_storage.get(&dht_key) {
+        Some(r) => r,
+        None => return,
+    };
 
-        // Drop the DHT lock before acquiring the metadata DB lock.
-        drop(dht_storage);
+    // Deserialize the DHT record value as a DeadDropEnvelope.
+    let envelope: DeadDropEnvelope = match serde_json::from_slice(&record.value) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
 
-        let db = match services.metadata_db.lock() {
-            Ok(d) => d,
-            Err(_) => return,
-        };
+    // Drop the DHT lock before acquiring the metadata DB lock.
+    drop(dht_storage);
 
-        // Check if this is a connection request or acceptance (unencrypted JSON payload).
-        if let Ok(payload) = serde_json::from_slice::<serde_json::Value>(&envelope.sealed_data) {
-            let payload_type = payload.get("type").and_then(|t| t.as_str());
+    let db = match services.metadata_db.lock() {
+        Ok(d) => d,
+        Err(_) => return,
+    };
 
-            if payload_type == Some("connection_request") {
-                let initiator_hex = payload.get("initiator").and_then(|v| v.as_str()).unwrap_or("");
-                let message = payload.get("message").and_then(|v| v.as_str());
-                let created_at = payload.get("created_at").and_then(|v| v.as_i64()).unwrap_or(0);
+    // Track whether we successfully processed this record so we can
+    // remove it from the DHT afterwards.
+    let mut processed = false;
 
-                if let Ok(initiator_bytes) = hex::decode(initiator_hex) {
-                    if initiator_bytes.len() == 32 {
-                        let local_bytes = pubkey.as_bytes().to_vec();
-                        let insert_result = db.conn().execute(
-                            "INSERT OR IGNORE INTO connections \
-                             (local_pubkey, remote_pubkey, status, created_at, updated_at, message, initiator_pubkey) \
-                             VALUES (?1, ?2, 'pending_incoming', ?3, ?3, ?4, ?2)",
-                            rusqlite::params![local_bytes, initiator_bytes, created_at, message],
-                        );
-                        match insert_result {
-                            Ok(rows) if rows > 0 => {
-                                tracing::info!(
-                                    from = %initiator_hex,
-                                    "DHT dead drop: received connection request"
-                                );
-                                // Emit event for frontend notification.
-                                let mut arr = [0u8; 32];
-                                arr.copy_from_slice(&initiator_bytes);
-                                services.event_bus.emit(Event::ConnectionRequestReceived {
-                                    from: ephemera_types::IdentityKey::from_bytes(arr),
-                                });
-                                // Store notification for notification center.
-                                let _ = crate::services::NotificationService::insert(
-                                    &services.metadata_db,
-                                    "connection_request",
-                                    Some(&initiator_bytes),
-                                    None,
-                                    message,
-                                    None,
-                                );
-                            }
-                            Ok(_) => {}
-                            Err(e) => {
-                                tracing::warn!(error = %e, "DHT dead drop: failed to insert connection request");
-                            }
+    // Check if this is a connection request or acceptance (unencrypted JSON payload).
+    if let Ok(payload) = serde_json::from_slice::<serde_json::Value>(&envelope.sealed_data) {
+        let payload_type = payload.get("type").and_then(|t| t.as_str());
+
+        if payload_type == Some("connection_request") {
+            let initiator_hex = payload.get("initiator").and_then(|v| v.as_str()).unwrap_or("");
+            let message = payload.get("message").and_then(|v| v.as_str());
+            let created_at = payload.get("created_at").and_then(|v| v.as_i64()).unwrap_or(0);
+
+            if let Ok(initiator_bytes) = hex::decode(initiator_hex) {
+                if initiator_bytes.len() == 32 {
+                    let local_bytes = pubkey.as_bytes().to_vec();
+                    let insert_result = db.conn().execute(
+                        "INSERT OR IGNORE INTO connections \
+                         (local_pubkey, remote_pubkey, status, created_at, updated_at, message, initiator_pubkey) \
+                         VALUES (?1, ?2, 'pending_incoming', ?3, ?3, ?4, ?2)",
+                        rusqlite::params![local_bytes, initiator_bytes, created_at, message],
+                    );
+                    match insert_result {
+                        Ok(rows) if rows > 0 => {
+                            tracing::info!(
+                                from = %initiator_hex,
+                                "dead drop: processing message type=connection_request"
+                            );
+                            // Emit event for frontend notification.
+                            let mut arr = [0u8; 32];
+                            arr.copy_from_slice(&initiator_bytes);
+                            services.event_bus.emit(Event::ConnectionRequestReceived {
+                                from: ephemera_types::IdentityKey::from_bytes(arr),
+                            });
+                            // Store notification for notification center.
+                            let _ = crate::services::NotificationService::insert(
+                                &services.metadata_db,
+                                "connection_request",
+                                Some(&initiator_bytes),
+                                None,
+                                message,
+                                None,
+                            );
                         }
-                        // Don't store connection requests in the dead drop table.
-                        return;
+                        Ok(_) => {
+                            // INSERT OR IGNORE hit a duplicate -- already processed,
+                            // but the DHT record was never cleaned up. Mark as
+                            // processed so we remove it now.
+                            tracing::debug!(
+                                from = %initiator_hex,
+                                "dead drop: connection_request already exists, removing stale DHT record"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "DHT dead drop: failed to insert connection request");
+                        }
                     }
+                    // Whether newly inserted or a duplicate, we've handled it.
+                    processed = true;
                 }
-            } else if payload_type == Some("connection_accepted") {
-                let acceptor_hex = payload.get("acceptor").and_then(|v| v.as_str()).unwrap_or("");
-                let accepted_at = payload.get("created_at").and_then(|v| v.as_i64()).unwrap_or(0);
+            }
+        } else if payload_type == Some("connection_accepted") {
+            let acceptor_hex = payload.get("acceptor").and_then(|v| v.as_str()).unwrap_or("");
+            let accepted_at = payload.get("created_at").and_then(|v| v.as_i64()).unwrap_or(0);
 
-                if let Ok(acceptor_bytes) = hex::decode(acceptor_hex) {
-                    if acceptor_bytes.len() == 32 {
-                        let local_bytes = pubkey.as_bytes().to_vec();
-                        // Update our pending_outgoing to connected.
-                        let update_result = db.conn().execute(
-                            "UPDATE connections SET status = 'connected', updated_at = ?3 \
-                             WHERE local_pubkey = ?1 AND remote_pubkey = ?2 AND status = 'pending_outgoing'",
-                            rusqlite::params![local_bytes, acceptor_bytes, accepted_at],
-                        );
-                        match update_result {
-                            Ok(rows) if rows > 0 => {
-                                tracing::info!(
-                                    from = %acceptor_hex,
-                                    "DHT dead drop: connection accepted, updated to connected"
-                                );
-                                let mut arr = [0u8; 32];
-                                arr.copy_from_slice(&acceptor_bytes);
-                                services.event_bus.emit(Event::ConnectionEstablished {
-                                    peer: ephemera_types::IdentityKey::from_bytes(arr),
-                                });
-                                // Store notification for notification center.
-                                let _ = crate::services::NotificationService::insert(
-                                    &services.metadata_db,
-                                    "connection_accepted",
-                                    Some(&acceptor_bytes),
-                                    None,
-                                    Some("Your connection request was accepted"),
-                                    None,
-                                );
-                            }
-                            Ok(_) => {
-                                tracing::debug!(
-                                    from = %acceptor_hex,
-                                    "DHT dead drop: connection acceptance but no pending_outgoing row found"
-                                );
-                            }
-                            Err(e) => {
-                                tracing::warn!(error = %e, "DHT dead drop: failed to update connection to connected");
-                            }
+            if let Ok(acceptor_bytes) = hex::decode(acceptor_hex) {
+                if acceptor_bytes.len() == 32 {
+                    let local_bytes = pubkey.as_bytes().to_vec();
+                    // Update our pending_outgoing to connected.
+                    let update_result = db.conn().execute(
+                        "UPDATE connections SET status = 'connected', updated_at = ?3 \
+                         WHERE local_pubkey = ?1 AND remote_pubkey = ?2 AND status = 'pending_outgoing'",
+                        rusqlite::params![local_bytes, acceptor_bytes, accepted_at],
+                    );
+                    match update_result {
+                        Ok(rows) if rows > 0 => {
+                            tracing::info!(
+                                from = %acceptor_hex,
+                                "dead drop: processing message type=connection_accepted"
+                            );
+                            let mut arr = [0u8; 32];
+                            arr.copy_from_slice(&acceptor_bytes);
+                            services.event_bus.emit(Event::ConnectionEstablished {
+                                peer: ephemera_types::IdentityKey::from_bytes(arr),
+                            });
+                            // Store notification for notification center.
+                            let _ = crate::services::NotificationService::insert(
+                                &services.metadata_db,
+                                "connection_accepted",
+                                Some(&acceptor_bytes),
+                                None,
+                                Some("Your connection request was accepted"),
+                                None,
+                            );
                         }
-                        // Don't store acceptances in the dead drop table.
-                        return;
+                        Ok(_) => {
+                            tracing::debug!(
+                                from = %acceptor_hex,
+                                "dead drop: connection_accepted but no pending_outgoing row (already processed or cancelled)"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "DHT dead drop: failed to update connection to connected");
+                        }
                     }
+                    // Whether we updated a row or not, we've handled this record.
+                    processed = true;
                 }
             }
         }
+    }
 
+    // If not a connection request/acceptance, deposit as a regular dead drop message.
+    if !processed {
         let msg_id = ephemera_types::ContentId::from_digest(envelope.message_id);
-        if let Err(e) = DeadDropService::deposit_raw(
+        let msg_id_hex = hex::encode(envelope.message_id);
+        match DeadDropService::deposit_raw(
             &db,
             &mailbox_key,
             &msg_id,
@@ -412,12 +454,43 @@ fn retrieve_dht_dead_drops(
             envelope.deposited_at,
             envelope.expires_at,
         ) {
-            tracing::trace!(
-                error = %e,
-                "DHT dead drop deposit failed (likely dup or expired)"
-            );
-        } else {
-            tracing::debug!("dead drop poll: ingested message from DHT");
+            Ok(()) => {
+                tracing::info!(
+                    message_id = %msg_id_hex,
+                    "dead drop: processing message type=sealed_message"
+                );
+                processed = true;
+            }
+            Err(e) => {
+                // Duplicate or expired messages are expected -- still mark as
+                // processed so we clean up the DHT record.
+                let err_str = e.to_string();
+                if err_str.contains("UNIQUE") || err_str.contains("expired") || err_str.contains("Expired") {
+                    tracing::debug!(
+                        message_id = %msg_id_hex,
+                        "dead drop: message already stored or expired, removing stale DHT record"
+                    );
+                    processed = true;
+                } else {
+                    tracing::warn!(
+                        message_id = %msg_id_hex,
+                        error = %e,
+                        "DHT dead drop deposit failed"
+                    );
+                }
+            }
+        }
+    }
+
+    // Drop the DB lock before re-acquiring the DHT lock.
+    drop(db);
+
+    // Remove the processed record from the DHT so it doesn't reappear.
+    if processed {
+        if let Ok(mut dht) = services.dht_storage.lock() {
+            if dht.remove(&dht_key) {
+                tracing::info!("dead drop: removed processed DHT record from mailbox");
+            }
         }
     }
 }
