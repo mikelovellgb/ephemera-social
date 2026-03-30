@@ -449,6 +449,26 @@ pub(crate) fn schema_v9() -> &'static str {
     "#
 }
 
+/// Migration 10: add notifications table for the notification center.
+pub(crate) fn schema_v10() -> &'static str {
+    r#"
+    CREATE TABLE IF NOT EXISTS notifications (
+        notification_id  TEXT NOT NULL PRIMARY KEY,
+        notification_type TEXT NOT NULL,
+        from_pubkey      BLOB,
+        display_name     TEXT,
+        preview          TEXT,
+        post_hash        BLOB,
+        is_read          INTEGER NOT NULL DEFAULT 0,
+        created_at       INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_notifications_unread
+        ON notifications(is_read, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_notifications_created
+        ON notifications(created_at DESC);
+    "#
+}
+
 #[cfg(test)]
 #[path = "metadata_tests.rs"]
 mod tests;

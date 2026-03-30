@@ -71,7 +71,7 @@
         avatarWrap.addEventListener('click', function () {
             var input = document.createElement('input');
             input.type = 'file';
-            input.accept = 'image/jpeg,image/png,image/webp';
+            input.accept = 'image/*';
             input.onchange = function () {
                 if (!input.files || !input.files[0]) return;
                 var file = input.files[0];
@@ -79,7 +79,45 @@
                     Ephemera.showToast('Image must be under 5MB', 'error');
                     return;
                 }
-                showAvatarCropModal(file, identity, container);
+                // Direct center-crop upload (skips broken crop modal)
+                var img = new Image();
+                var reader = new FileReader();
+                reader.onload = function (e) {
+                    img.onload = async function () {
+                        var canvas = document.createElement('canvas');
+                        canvas.width = 512;
+                        canvas.height = 512;
+                        var ctx = canvas.getContext('2d');
+                        var size = Math.min(img.width, img.height);
+                        var sx = (img.width - size) / 2;
+                        var sy = (img.height - size) / 2;
+                        ctx.drawImage(img, sx, sy, size, size, 0, 0, 512, 512);
+                        canvas.toBlob(async function (blob) {
+                            if (!blob) {
+                                Ephemera.showToast('Failed to process image', 'error');
+                                return;
+                            }
+                            try {
+                                var buf = await blob.arrayBuffer();
+                                var hex = Array.from(new Uint8Array(buf)).map(function (b) {
+                                    return b.toString(16).padStart(2, '0');
+                                }).join('');
+                                var result = await Ephemera.rpc('profiles.update_avatar', { data_hex: hex, filename: 'avatar.jpg' });
+                                identity.avatar_url = result.avatar_url;
+                                Ephemera.store.set({ identity: identity });
+                                Ephemera.showToast('Avatar updated!', 'success');
+                                renderProfile(container);
+                            } catch (err) {
+                                Ephemera.showToast('Upload failed: ' + err.message, 'error');
+                            }
+                        }, 'image/jpeg', 0.85);
+                    };
+                    img.src = e.target.result;
+                };
+                reader.onerror = function () {
+                    Ephemera.showToast('Could not read image file', 'error');
+                };
+                reader.readAsDataURL(file);
             };
             input.click();
         });

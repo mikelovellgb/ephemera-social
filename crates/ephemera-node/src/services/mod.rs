@@ -9,6 +9,7 @@ mod feed;
 pub mod handle;
 pub mod identity;
 pub mod media;
+pub mod notifications;
 mod post;
 mod social;
 
@@ -17,6 +18,7 @@ pub use feed::FeedService;
 pub use handle::HandleService;
 pub use identity::IdentityService;
 pub use media::MediaFile;
+pub use notifications::NotificationService;
 pub use post::PostService;
 pub use social::{MessageService, ModerationService, ProfileService, SocialService};
 

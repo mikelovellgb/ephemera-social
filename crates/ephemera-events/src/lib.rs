@@ -95,6 +95,12 @@ pub enum Event {
         peer: IdentityKey,
     },
 
+    /// A connection request was accepted.
+    ConnectionAccepted {
+        /// Hex-encoded pubkey of the accepted peer.
+        peer: String,
+    },
+
     /// A reaction was added to a post.
     ReactionReceived {
         /// The post that was reacted to.

@@ -129,7 +129,7 @@ var Ephemera = (function () {
     // ================================================================
 
     var routes = {};
-    var routeOrder = ['/feed', '/discover', '/compose', '/groups', '/messages', '/profile'];
+    var routeOrder = ['/feed', '/discover', '/connections', '/compose', '/groups', '/messages', '/profile'];
 
     function registerRoute(path, renderFn) {
         routes[path] = renderFn;
@@ -372,6 +372,39 @@ var Ephemera = (function () {
     }
 
     // ================================================================
+    // Notification Badge
+    // ================================================================
+
+    var _notificationPollTimer = null;
+
+    function updateNotificationBadge(count) {
+        var badge = document.getElementById('notification-badge');
+        if (!badge) return;
+        if (count > 0) {
+            badge.textContent = count > 99 ? '99+' : String(count);
+            badge.style.display = '';
+        } else {
+            badge.style.display = 'none';
+        }
+    }
+
+    async function pollNotificationCount() {
+        try {
+            var result = await rpc('notifications.count', {});
+            updateNotificationBadge(result.unread_count || 0);
+        } catch (_e) {
+            // Silently ignore (identity locked, not yet initialized, etc.)
+        }
+    }
+
+    function startNotificationPolling() {
+        if (_notificationPollTimer) return;
+        // Poll every 15 seconds
+        pollNotificationCount();
+        _notificationPollTimer = setInterval(pollNotificationCount, 15000);
+    }
+
+    // ================================================================
     // Initialization
     // ================================================================
 
@@ -422,6 +455,9 @@ var Ephemera = (function () {
 
         // Handle ephemera:// deep links (from QR codes scanned by system camera)
         handleDeepLink();
+
+        // Start notification badge polling
+        startNotificationPolling();
     }
 
     function handleDeepLink() {
@@ -473,6 +509,7 @@ var Ephemera = (function () {
         rpc: rpc,
         navigate: navigate,
         registerRoute: registerRoute,
+        getCurrentRoute: getCurrentRoute,
         showToast: showToast,
         timeAgo: timeAgo,
         formatTTL: formatTTL,
@@ -486,6 +523,7 @@ var Ephemera = (function () {
         audienceLabel: audienceLabel,
         audienceIcon: audienceIcon,
         highlightMentions: highlightMentions,
+        updateNotificationBadge: updateNotificationBadge,
         init: init,
     };
 })();

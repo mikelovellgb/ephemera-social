@@ -11,6 +11,7 @@
 use crate::services::ServiceContainer;
 use ephemera_events::{Event, EventBus};
 use ephemera_message::DeadDropService;
+use ephemera_social::ConnectionService;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -25,6 +26,9 @@ const DEAD_DROP_POLL_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 /// Reputation decay interval: once per day.
 const REPUTATION_DECAY_INTERVAL: Duration = Duration::from_secs(24 * 3600);
+
+/// Profile refresh interval: every 30 minutes.
+const PROFILE_REFRESH_INTERVAL: Duration = Duration::from_secs(30 * 60);
 
 /// Garbage collection loop: periodically sweep expired posts and purge
 /// old tombstones from the metadata database and content store.
@@ -329,6 +333,15 @@ fn retrieve_dht_dead_drops(
                                 services.event_bus.emit(Event::ConnectionRequestReceived {
                                     from: ephemera_types::IdentityKey::from_bytes(arr),
                                 });
+                                // Store notification for notification center.
+                                let _ = crate::services::NotificationService::insert(
+                                    &services.metadata_db,
+                                    "connection_request",
+                                    Some(&initiator_bytes),
+                                    None,
+                                    message,
+                                    None,
+                                );
                             }
                             Ok(_) => {}
                             Err(e) => {
@@ -363,6 +376,15 @@ fn retrieve_dht_dead_drops(
                                 services.event_bus.emit(Event::ConnectionEstablished {
                                     peer: ephemera_types::IdentityKey::from_bytes(arr),
                                 });
+                                // Store notification for notification center.
+                                let _ = crate::services::NotificationService::insert(
+                                    &services.metadata_db,
+                                    "connection_accepted",
+                                    Some(&acceptor_bytes),
+                                    None,
+                                    Some("Your connection request was accepted"),
+                                    None,
+                                );
                             }
                             Ok(_) => {
                                 tracing::debug!(
@@ -433,6 +455,104 @@ pub async fn reputation_decay_loop(
             }
             _ = shutdown_rx.changed() => {
                 tracing::debug!("reputation decay loop shutting down");
+                break;
+            }
+        }
+    }
+}
+
+/// Periodically refresh connected users' profiles from the DHT.
+///
+/// Runs every 30 minutes. For each active connection, looks up the remote
+/// peer's profile in the DHT and updates the local profiles table if a
+/// newer version is found.
+pub async fn profile_refresh_loop(
+    services: Arc<ServiceContainer>,
+    mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
+) {
+    use crate::services::dht::DhtNodeService;
+
+    let mut interval = tokio::time::interval(PROFILE_REFRESH_INTERVAL);
+
+    loop {
+        tokio::select! {
+            _ = interval.tick() => {
+                // Get the local identity (skip if locked).
+                let local = match services.identity.get_signing_keypair() {
+                    Ok(kp) => kp.public_key(),
+                    Err(_) => continue,
+                };
+
+                // List all active connections.
+                let connections: Vec<ephemera_social::Connection> = match services.social.social_services
+                    .list(&local, Some(ephemera_social::ConnectionStatus::Active))
+                    .await
+                {
+                    Ok(conns) => conns,
+                    Err(e) => {
+                        tracing::debug!(error = %e, "profile refresh: failed to list connections");
+                        continue;
+                    }
+                };
+
+                if connections.is_empty() {
+                    continue;
+                }
+
+                let mut refreshed = 0u32;
+                for conn in &connections {
+                    // Determine the remote peer's pubkey.
+                    let remote = if conn.initiator == local {
+                        &conn.responder
+                    } else {
+                        &conn.initiator
+                    };
+                    let remote_hex = hex::encode(remote.as_bytes());
+
+                    // Look up profile from DHT.
+                    let profile = match DhtNodeService::lookup_profile(&remote_hex, &services.dht_storage) {
+                        Ok(Some(p)) => p,
+                        _ => continue,
+                    };
+
+                    let display_name = profile.get("display_name").and_then(|v| v.as_str());
+                    let bio = profile.get("bio").and_then(|v| v.as_str());
+
+                    if display_name.is_none() && bio.is_none() {
+                        continue;
+                    }
+
+                    // Store in local profiles table.
+                    if let Ok(db) = services.metadata_db.lock() {
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs() as i64;
+                        let empty_sig: Vec<u8> = vec![0u8; 64];
+                        let pk_bytes = remote.as_bytes().to_vec();
+                        let _ = db.conn().execute(
+                            "INSERT INTO profiles (pubkey, display_name, bio, updated_at, signature, received_at)
+                             VALUES (?1, ?2, ?3, ?4, ?5, ?4)
+                             ON CONFLICT(pubkey) DO UPDATE SET
+                                display_name = COALESCE(?2, display_name),
+                                bio = COALESCE(?3, bio),
+                                updated_at = ?4, signature = ?5, received_at = ?4",
+                            rusqlite::params![pk_bytes, display_name, bio, now, empty_sig],
+                        );
+                        refreshed += 1;
+                    }
+                }
+
+                if refreshed > 0 {
+                    tracing::info!(
+                        refreshed,
+                        total = connections.len(),
+                        "profile refresh: updated connected user profiles from DHT"
+                    );
+                }
+            }
+            _ = shutdown_rx.changed() => {
+                tracing::debug!("profile refresh loop shutting down");
                 break;
             }
         }

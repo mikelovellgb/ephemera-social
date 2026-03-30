@@ -62,6 +62,11 @@ fn all_migrations() -> Vec<Migration> {
             description: "Add groups, group_members, group_bans, group_posts, group_chats, group_chat_members, group_chat_messages",
             up: metadata::schema_v9(),
         },
+        Migration {
+            version: 10,
+            description: "Add notifications table for notification center",
+            up: metadata::schema_v10(),
+        },
     ]
 }
 

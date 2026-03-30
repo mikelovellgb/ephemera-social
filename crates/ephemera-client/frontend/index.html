@@ -49,12 +49,13 @@
                 </svg>
                 <span>Messages</span>
             </a>
-            <a href="#/profile" class="nav-item" data-route="profile" aria-label="Profile">
+            <a href="#/profile" class="nav-item" data-route="profile" aria-label="Profile" style="position:relative;">
                 <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
                     <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
                     <circle cx="12" cy="7" r="4"/>
                 </svg>
                 <span>Profile</span>
+                <span id="notification-badge" class="notification-badge" style="display:none;position:absolute;top:2px;right:4px;min-width:16px;height:16px;border-radius:8px;background:var(--accent,#6366f1);color:#fff;font-size:10px;line-height:16px;text-align:center;padding:0 4px;font-weight:700;pointer-events:none;"></span>
             </a>
         </nav>
         <main id="main-content" class="main-content" role="main" aria-live="polite">
@@ -69,6 +70,7 @@
     <script src="/src/views/feed.js"></script>
     <script src="/src/views/compose.js"></script>
     <script src="/src/views/discover.js"></script>
+    <script src="/src/views/connections.js"></script>
     <script src="/src/views/groups.js"></script>
     <script src="/src/views/messages.js"></script>
     <script src="/src/views/profile.js"></script>

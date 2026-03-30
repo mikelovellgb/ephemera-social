@@ -481,6 +481,16 @@ impl EphemeraNode {
             tracing::info!("spawned DHT maintenance task");
         }
 
+        // 9. Periodic profile refresh for connected users (every 30 min)
+        {
+            let shutdown_rx = self.shutdown.subscribe();
+            let services = Arc::clone(&self.services);
+            tokio::spawn(async move {
+                background::profile_refresh_loop(services, shutdown_rx).await;
+            });
+            tracing::info!("spawned profile refresh task");
+        }
+
         self.running = true;
         tracing::info!("ephemera node started");
 

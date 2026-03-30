@@ -448,12 +448,17 @@
         // Step 3: Send social connection request
         updateStep(step3, '[3/3] Saving connection request...', 'active');
         try {
-            await Ephemera.rpc('social.connect', {
+            var connectResult = await Ephemera.rpc('social.connect', {
                 target: pubkey,
                 message: message || 'Hi! I\'d like to connect.',
             });
-            updateStep(step3, '[3/3] Connection request sent!', 'success');
-            Ephemera.showToast('Connection request sent!', 'success');
+            if (connectResult && connectResult.delivered) {
+                updateStep(step3, '[3/3] Connection request sent!', 'success');
+                Ephemera.showToast('Request sent!', 'success');
+            } else {
+                updateStep(step3, '[3/3] Request saved locally. Will send when peer is reachable.', 'success');
+                Ephemera.showToast('Request saved locally. Will send when peer is reachable.', 'info');
+            }
         } catch (err) {
             updateStep(step3, '[3/3] Failed to send request: ' + (err.message || err), 'error');
             throw err;
@@ -601,14 +606,26 @@
             }
 
             if (active.length > 0) {
-                container.appendChild(Ephemera.el('div', 'section-title',
-                    'Connected (' + active.length + ')'));
+                var activeTitleRow = Ephemera.el('div', 'section-title-row');
+                activeTitleRow.appendChild(Ephemera.el('div', 'section-title', 'Connected (' + active.length + ')'));
+                var viewAllBtn = Ephemera.el('button', 'btn btn-ghost btn-sm', 'View All');
+                viewAllBtn.addEventListener('click', function () { Ephemera.navigate('/connections'); });
+                activeTitleRow.appendChild(viewAllBtn);
+                container.appendChild(activeTitleRow);
                 var activeList = Ephemera.el('div', '');
                 activeList.setAttribute('role', 'list');
-                active.forEach(function (c) {
+                // Show only first 5 connections in Discover; full list in /connections
+                active.slice(0, 5).forEach(function (c) {
                     activeList.appendChild(renderConnectionCard(c, container));
                 });
                 container.appendChild(activeList);
+                if (active.length > 5) {
+                    var moreBtn = Ephemera.el('button', 'btn btn-ghost btn-full btn-sm',
+                        'View all ' + active.length + ' connections');
+                    moreBtn.style.marginTop = '8px';
+                    moreBtn.addEventListener('click', function () { Ephemera.navigate('/connections'); });
+                    container.appendChild(moreBtn);
+                }
             }
 
             if (pending.length === 0 && active.length === 0 && outgoing.length === 0) {

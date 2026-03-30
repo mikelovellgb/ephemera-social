@@ -73,6 +73,70 @@ fn get_local_identity(identity: &IdentityService) -> Result<IdentityKey, String>
     Ok(signing_kp.public_key())
 }
 
+/// Fetch a remote user's profile from DHT and store it locally in the
+/// profiles table. Best-effort: logs warnings on failure but never returns
+/// an error since this is supplementary to the main connection flow.
+fn fetch_and_store_remote_profile(
+    pubkey_hex: &str,
+    dht_storage: &Mutex<DhtStorage>,
+    metadata_db: Option<&Mutex<MetadataDb>>,
+) {
+    match DhtNodeService::lookup_profile(pubkey_hex, dht_storage) {
+        Ok(Some(profile)) => {
+            let display_name = profile.get("display_name").and_then(|v| v.as_str());
+            let bio = profile.get("bio").and_then(|v| v.as_str());
+
+            if display_name.is_none() && bio.is_none() {
+                tracing::debug!(pubkey = %pubkey_hex, "remote profile from DHT has no display_name or bio");
+                return;
+            }
+
+            // If we have a metadata_db, store the profile there.
+            if let Some(mdb) = metadata_db {
+                if let Ok(pk_bytes) = hex::decode(pubkey_hex) {
+                    if let Ok(db) = mdb.lock() {
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs() as i64;
+                        let empty_sig: Vec<u8> = vec![0u8; 64];
+                        let _ = db.conn().execute(
+                            "INSERT INTO profiles (pubkey, display_name, bio, updated_at, signature, received_at)
+                             VALUES (?1, ?2, ?3, ?4, ?5, ?4)
+                             ON CONFLICT(pubkey) DO UPDATE SET
+                                display_name = COALESCE(?2, display_name),
+                                bio = COALESCE(?3, bio),
+                                updated_at = ?4, signature = ?5, received_at = ?4",
+                            rusqlite::params![pk_bytes, display_name, bio, now, empty_sig],
+                        );
+                        tracing::info!(
+                            pubkey = %pubkey_hex,
+                            display_name = ?display_name,
+                            "stored remote profile from DHT"
+                        );
+                    }
+                }
+            } else {
+                tracing::debug!(
+                    pubkey = %pubkey_hex,
+                    display_name = ?display_name,
+                    "found remote profile in DHT (no metadata_db to store it)"
+                );
+            }
+        }
+        Ok(None) => {
+            tracing::debug!(pubkey = %pubkey_hex, "no profile found in DHT for remote user");
+        }
+        Err(e) => {
+            tracing::warn!(
+                pubkey = %pubkey_hex,
+                error = %e,
+                "failed to lookup remote profile from DHT"
+            );
+        }
+    }
+}
+
 /// Serialize a Connection to JSON.
 ///
 /// When `local` is provided, computes `pseudonym_id` as the "other" peer
@@ -163,6 +227,7 @@ impl SocialService {
         identity: &IdentityService,
         network: Option<&crate::network::NetworkSubsystem>,
         dht_storage: Option<&Mutex<DhtStorage>>,
+        metadata_db: Option<&Mutex<MetadataDb>>,
     ) -> Result<Value, String> {
         let local = get_local_identity(identity)?;
         let remote = parse_pubkey(target)?;
@@ -251,10 +316,18 @@ impl SocialService {
             }
         }
 
+        // Fetch the remote user's profile from DHT and store locally.
+        if let Some(dht) = dht_storage {
+            fetch_and_store_remote_profile(target, dht, metadata_db);
+        }
+
+        let delivered = published_gossip || published_dht;
         let mut result = connection_to_json(&conn, Some(&local), None);
         if let Some(obj) = result.as_object_mut() {
             obj.insert("published_gossip".to_string(), serde_json::json!(published_gossip));
             obj.insert("published_dht".to_string(), serde_json::json!(published_dht));
+            obj.insert("sent".to_string(), serde_json::json!(true));
+            obj.insert("delivered".to_string(), serde_json::json!(delivered));
         }
         Ok(result)
     }
@@ -271,6 +344,7 @@ impl SocialService {
         identity: &IdentityService,
         network: Option<&crate::network::NetworkSubsystem>,
         dht_storage: Option<&Mutex<DhtStorage>>,
+        metadata_db: Option<&Mutex<MetadataDb>>,
     ) -> Result<Value, String> {
         let local = get_local_identity(identity)?;
         let remote = parse_pubkey(from)?;
@@ -351,10 +425,18 @@ impl SocialService {
             }
         }
 
+        // Fetch the remote user's profile from DHT and store locally.
+        if let Some(dht) = dht_storage {
+            fetch_and_store_remote_profile(from, dht, metadata_db);
+        }
+
+        let delivered = published_gossip || published_dht;
         let mut result = connection_to_json(&conn, Some(&local), None);
         if let Some(obj) = result.as_object_mut() {
             obj.insert("published_gossip".to_string(), serde_json::json!(published_gossip));
             obj.insert("published_dht".to_string(), serde_json::json!(published_dht));
+            obj.insert("sent".to_string(), serde_json::json!(true));
+            obj.insert("delivered".to_string(), serde_json::json!(delivered));
         }
         Ok(result)
     }
@@ -402,9 +484,16 @@ impl SocialService {
         identity: &IdentityService,
         network: Option<&crate::network::NetworkSubsystem>,
         dht_storage: Option<&Mutex<DhtStorage>>,
+        metadata_db: Option<&Mutex<MetadataDb>>,
     ) -> Result<Value, String> {
         let local = get_local_identity(identity)?;
         let remote = parse_pubkey(target)?;
+
+        tracing::info!(
+            target = %target,
+            local = %hex::encode(local.as_bytes()),
+            "resend_request: starting resend flow"
+        );
 
         // Remove the stale pending_outgoing row (best-effort).
         match self.social_services.reject(&local, &remote).await {
@@ -425,11 +514,25 @@ impl SocialService {
 
         // Also remove from the other direction in case the remote side
         // previously rejected and we have a stale row.
-        let _ = self.social_services.reject(&remote, &local).await;
+        match self.social_services.reject(&remote, &local).await {
+            Ok(()) => {
+                tracing::info!(
+                    target = %target,
+                    "resend_request: deleted reverse-direction row"
+                );
+            }
+            Err(e) => {
+                tracing::debug!(
+                    target = %target,
+                    error = %e,
+                    "resend_request: no reverse row to delete (expected)"
+                );
+            }
+        }
 
         // Re-issue the connection request through the normal path, which
         // stores a fresh row and publishes to gossip + DHT.
-        match self.connect(target, msg, identity, network, dht_storage).await {
+        match self.connect(target, msg, identity, network, dht_storage, metadata_db).await {
             Ok(result) => {
                 tracing::info!(
                     target = %target,
@@ -544,7 +647,7 @@ impl SocialService {
     pub async fn follow(&self, target: &str, identity: &IdentityService) -> Result<Value, String> {
         // For now, follow is implemented as a connection request.
         // No network/DHT for follows (they're local-only for now).
-        self.connect(target, "", identity, None, None).await?;
+        self.connect(target, "", identity, None, None, None).await?;
         Ok(serde_json::json!({ "followed": true }))
     }
 

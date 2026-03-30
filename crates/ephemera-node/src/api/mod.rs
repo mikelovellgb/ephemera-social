@@ -45,6 +45,7 @@ pub fn build_router_with_network(
     social::register_groups(&mut router, &services);
     social::register_group_chats(&mut router, &services);
     social::register_mentions(&mut router, &services);
+    social::register_notifications(&mut router, &services);
     content::register_discover(&mut router, &services);
     dht::register_dht(&mut router, &services);
 

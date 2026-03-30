@@ -45,7 +45,7 @@ pub fn register_social(router: &mut Router, services: &Arc<ServiceContainer>) {
             };
             let net_ref = net_arc.as_deref();
             svc.social
-                .connect(&target, message, &svc.identity, net_ref, Some(&svc.dht_storage))
+                .connect(&target, message, &svc.identity, net_ref, Some(&svc.dht_storage), Some(&svc.metadata_db))
                 .await
                 .map_err(internal_error)
         }
@@ -61,10 +61,26 @@ pub fn register_social(router: &mut Router, services: &Arc<ServiceContainer>) {
                 guard.clone()
             };
             let net_ref = net_arc.as_deref();
-            svc.social
-                .accept(&from, &svc.identity, net_ref, Some(&svc.dht_storage))
+            let result = svc.social
+                .accept(&from, &svc.identity, net_ref, Some(&svc.dht_storage), Some(&svc.metadata_db))
                 .await
-                .map_err(internal_error)
+                .map_err(internal_error)?;
+
+            // Emit a ConnectionAccepted notification (best-effort).
+            let display_name = result.get("display_name").and_then(|v| v.as_str());
+            let from_bytes = hex::decode(&from).ok();
+            let _ = crate::services::NotificationService::insert(
+                &svc.metadata_db,
+                "connection_accepted",
+                from_bytes.as_deref(),
+                display_name,
+                Some("You accepted a connection request"),
+                None,
+            );
+            svc.event_bus.emit(Event::ConnectionAccepted {
+                peer: from.clone(),
+            });
+            Ok(result)
         }
     });
 
@@ -116,7 +132,7 @@ pub fn register_social(router: &mut Router, services: &Arc<ServiceContainer>) {
             };
             let net_ref = net_arc.as_deref();
             svc.social
-                .resend_request(&target, message, &svc.identity, net_ref, Some(&svc.dht_storage))
+                .resend_request(&target, message, &svc.identity, net_ref, Some(&svc.dht_storage), Some(&svc.metadata_db))
                 .await
                 .map_err(internal_error)
         }
@@ -747,6 +763,45 @@ pub fn register_topics(router: &mut Router, services: &Arc<ServiceContainer>) {
             let tid = extract_str(&params, "topic_id")?;
             let ch = extract_str(&params, "content_hash")?;
             svc.social.post_to_topic(&tid, &ch).await.map_err(internal_error)
+        }
+    });
+}
+
+/// Register `notifications.*` namespace methods.
+pub fn register_notifications(router: &mut Router, services: &Arc<ServiceContainer>) {
+    use crate::services::NotificationService;
+
+    let svc = Arc::clone(services);
+    router.register("notifications.list", move |params| {
+        let svc = Arc::clone(&svc);
+        async move {
+            let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(50) as u32;
+            NotificationService::list_unread(&svc.metadata_db, limit).map_err(internal_error)
+        }
+    });
+
+    let svc = Arc::clone(services);
+    router.register("notifications.count", move |_params| {
+        let svc = Arc::clone(&svc);
+        async move {
+            NotificationService::count_unread(&svc.metadata_db).map_err(internal_error)
+        }
+    });
+
+    let svc = Arc::clone(services);
+    router.register("notifications.mark_read", move |params| {
+        let svc = Arc::clone(&svc);
+        async move {
+            let id = extract_str(&params, "notification_id")?;
+            NotificationService::mark_read(&svc.metadata_db, &id).map_err(internal_error)
+        }
+    });
+
+    let svc = Arc::clone(services);
+    router.register("notifications.mark_all_read", move |_params| {
+        let svc = Arc::clone(&svc);
+        async move {
+            NotificationService::mark_all_read(&svc.metadata_db).map_err(internal_error)
         }
     });
 }
