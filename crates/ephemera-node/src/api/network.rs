@@ -323,9 +323,13 @@ pub fn register_network_dynamic(router: &mut Router, services: &Arc<ServiceConta
         let svc = Arc::clone(&svc);
         async move {
             let net = get_net(&svc)?;
+            let transport = net.transport_kind();
+            tracing::info!(?transport, local_id = %net.local_id(), "network.connect: using transport");
+
             let addr = params.get("addr").and_then(|v| v.as_str()).map(String::from);
             let node_id = params.get("node_id").and_then(|v| v.as_str()).map(String::from);
             if let Some(nid) = node_id {
+                tracing::info!(target_node_id = %nid, "network.connect: attempting connection by node_id");
                 let nid_bytes = hex::decode(&nid).map_err(|e| JsonRpcError {
                     code: error_codes::INVALID_PARAMS,
                     message: format!("bad node_id hex: {e}"),
@@ -337,11 +341,16 @@ pub fn register_network_dynamic(router: &mut Router, services: &Arc<ServiceConta
                     node_id: NodeId::from_bytes(arr),
                     addresses: addr.iter().cloned().collect(),
                 };
-                net.connect_to_peer(&peer_addr).await.map_err(|e| JsonRpcError {
-                    code: error_codes::INTERNAL_ERROR,
-                    message: format!("connect failed: {e}"),
-                    data: None,
+                tracing::info!(?peer_addr, "network.connect: calling connect_to_peer");
+                net.connect_to_peer(&peer_addr).await.map_err(|e| {
+                    tracing::error!(error = %e, "network.connect: FAILED");
+                    JsonRpcError {
+                        code: error_codes::INTERNAL_ERROR,
+                        message: format!("connect failed: {e}"),
+                        data: None,
+                    }
                 })?;
+                tracing::info!("network.connect: SUCCESS");
                 Ok(serde_json::json!({"connected": true, "node_id": nid}))
             } else if let Some(a) = addr {
                 let peer_addr = PeerAddr {
