@@ -11,6 +11,15 @@
 //!
 //! This transport uses the ALPN string `b"ephemera/0"` for all connections.
 //! This ensures that only Ephemera nodes accept connections from each other.
+//!
+//! # Relay & Discovery
+//!
+//! After binding, the endpoint must go "online" (connect to at least one relay
+//! server) before it can be discovered by other peers. The constructors call
+//! `endpoint.online().await` with a timeout to ensure the relay is connected
+//! before returning. Without this, outbound `connect()` calls targeting a
+//! NodeId-only address may fail because the remote hasn't published its relay
+//! URL yet, and *this* endpoint hasn't published either.
 
 use crate::error::TransportError;
 use crate::{PeerAddr, Transport};
@@ -20,6 +29,7 @@ use iroh::endpoint::presets;
 use iroh::{EndpointAddr, Endpoint, TransportAddr};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{mpsc, Mutex};
 use tracing;
 
@@ -28,6 +38,11 @@ const EPHEMERA_ALPN: &[u8] = b"ephemera/0";
 
 /// Maximum frame size: 1 MiB (matches the TCP transport limit).
 const MAX_FRAME_SIZE: u32 = 1_048_576;
+
+/// How long to wait for the endpoint to go "online" (connect to a relay
+/// server and obtain a local address). Without this, discovery publishing
+/// won't have happened yet and remote peers can't find us.
+const ONLINE_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Internal message routed from an Iroh connection reader task.
 struct InboundMessage {
@@ -65,7 +80,10 @@ impl IrohTransport {
     /// Create a new Iroh transport with a random identity.
     ///
     /// Uses n0's public relay servers for NAT traversal and discovery.
-    /// The endpoint binds to an ephemeral port immediately.
+    /// The endpoint binds to an ephemeral port immediately, then waits
+    /// (up to [`ONLINE_TIMEOUT`]) for relay connectivity so that the
+    /// node's address is published to discovery before any `connect()`
+    /// calls are attempted.
     pub async fn new() -> Result<Self, TransportError> {
         let endpoint = Endpoint::builder(presets::N0)
             .alpns(vec![EPHEMERA_ALPN.to_vec()])
@@ -77,6 +95,15 @@ impl IrohTransport {
             })?;
 
         let local_node_id = iroh_pubkey_to_node_id(endpoint.id());
+        tracing::info!(
+            node_id = %local_node_id,
+            "Iroh endpoint bound, waiting for relay connection..."
+        );
+
+        // Wait for the endpoint to connect to at least one relay server.
+        // This is CRITICAL: without this, the Pkarr publisher hasn't
+        // announced our relay URL yet, so no one can discover us.
+        Self::wait_online(&endpoint, &local_node_id).await?;
 
         let (inbound_tx, inbound_rx) = mpsc::channel(1024);
         let peers: Arc<Mutex<HashMap<NodeId, PeerState>>> =
@@ -93,7 +120,7 @@ impl IrohTransport {
 
         tracing::info!(
             node_id = %local_node_id,
-            "Iroh transport created"
+            "Iroh transport created and online"
         );
 
         Ok(Self {
@@ -109,6 +136,7 @@ impl IrohTransport {
     /// Create a new Iroh transport from a known secret key.
     ///
     /// This produces a deterministic NodeId for the same secret key bytes.
+    /// Waits for relay connectivity before returning (see [`Self::new`]).
     pub async fn with_secret_key(secret_key_bytes: [u8; 32]) -> Result<Self, TransportError> {
         let secret_key = iroh::SecretKey::from_bytes(&secret_key_bytes);
 
@@ -123,6 +151,13 @@ impl IrohTransport {
             })?;
 
         let local_node_id = iroh_pubkey_to_node_id(endpoint.id());
+        tracing::info!(
+            node_id = %local_node_id,
+            "Iroh endpoint bound (deterministic key), waiting for relay connection..."
+        );
+
+        // Wait for relay connectivity -- same reason as in `new()`.
+        Self::wait_online(&endpoint, &local_node_id).await?;
 
         let (inbound_tx, inbound_rx) = mpsc::channel(1024);
         let peers: Arc<Mutex<HashMap<NodeId, PeerState>>> =
@@ -138,7 +173,7 @@ impl IrohTransport {
 
         tracing::info!(
             node_id = %local_node_id,
-            "Iroh transport created (deterministic key)"
+            "Iroh transport created and online (deterministic key)"
         );
 
         Ok(Self {
@@ -164,17 +199,66 @@ impl IrohTransport {
         &self.endpoint
     }
 
+    /// Wait for the Iroh endpoint to go "online" (connected to a relay
+    /// server) with a timeout. This ensures:
+    ///
+    /// 1. Our relay URL is known so PkarrPublisher can announce it.
+    /// 2. We can relay-forward packets to/from peers behind NATs.
+    ///
+    /// Without this wait, `connect()` to a NodeId-only address will fail
+    /// because neither side has published their relay URL to discovery yet.
+    async fn wait_online(
+        endpoint: &Endpoint,
+        local_node_id: &NodeId,
+    ) -> Result<(), TransportError> {
+        match tokio::time::timeout(ONLINE_TIMEOUT, endpoint.online()).await {
+            Ok(()) => {
+                tracing::info!(
+                    node_id = %local_node_id,
+                    "Iroh endpoint is ONLINE (relay connected)"
+                );
+
+                // Log the endpoint address for diagnostics.
+                let addr = endpoint.addr();
+                tracing::info!(
+                    node_id = %local_node_id,
+                    endpoint_addr = ?addr,
+                    "Iroh endpoint address after going online"
+                );
+
+                Ok(())
+            }
+            Err(_) => {
+                tracing::warn!(
+                    node_id = %local_node_id,
+                    timeout_secs = ONLINE_TIMEOUT.as_secs(),
+                    "Iroh endpoint did NOT go online within timeout. \
+                     Continuing anyway, but peer discovery may not work \
+                     until a relay connection is established."
+                );
+                // Don't fail hard -- the node can still function for
+                // local connections. But discovery-based connects will
+                // likely fail until the relay comes up.
+                Ok(())
+            }
+        }
+    }
+
     /// Background loop accepting incoming QUIC connections.
     async fn accept_loop(
         endpoint: Endpoint,
         peers: Arc<Mutex<HashMap<NodeId, PeerState>>>,
         inbound_tx: mpsc::Sender<InboundMessage>,
     ) {
+        tracing::info!("Iroh accept loop: waiting for incoming connections...");
         loop {
             let incoming = match endpoint.accept().await {
-                Some(incoming) => incoming,
+                Some(incoming) => {
+                    tracing::info!("Iroh accept loop: received incoming connection attempt");
+                    incoming
+                }
                 None => {
-                    tracing::debug!("Iroh accept loop: endpoint closed");
+                    tracing::info!("Iroh accept loop: endpoint closed, exiting accept loop");
                     break;
                 }
             };
@@ -184,28 +268,37 @@ impl IrohTransport {
 
             tokio::spawn(async move {
                 match incoming.accept() {
-                    Ok(accepting) => match accepting.await {
-                        Ok(connection) => {
-                            let remote_pubkey = connection.remote_id();
-                            let remote_node_id = iroh_pubkey_to_node_id(remote_pubkey);
-                            tracing::info!(
-                                ?remote_node_id,
-                                "accepted incoming Iroh connection"
-                            );
-                            Self::setup_connection(
-                                connection,
-                                remote_node_id,
-                                peers,
-                                inbound_tx,
-                            )
-                            .await;
+                    Ok(accepting) => {
+                        tracing::info!("Iroh accept loop: QUIC handshake in progress...");
+                        match accepting.await {
+                            Ok(connection) => {
+                                let remote_pubkey = connection.remote_id();
+                                let remote_node_id = iroh_pubkey_to_node_id(remote_pubkey);
+                                tracing::info!(
+                                    remote = ?remote_node_id,
+                                    "Iroh accept loop: incoming connection accepted!"
+                                );
+                                Self::setup_connection(
+                                    connection,
+                                    remote_node_id,
+                                    peers,
+                                    inbound_tx,
+                                )
+                                .await;
+                            }
+                            Err(e) => {
+                                tracing::error!(
+                                    error = %e,
+                                    "Iroh accept loop: QUIC handshake FAILED"
+                                );
+                            }
                         }
-                        Err(e) => {
-                            tracing::warn!(error = %e, "incoming Iroh connection failed");
-                        }
-                    },
+                    }
                     Err(e) => {
-                        tracing::warn!(error = %e, "failed to accept incoming connection");
+                        tracing::error!(
+                            error = %e,
+                            "Iroh accept loop: failed to accept incoming connection"
+                        );
                     }
                 }
             });
@@ -219,12 +312,21 @@ impl IrohTransport {
         peers: Arc<Mutex<HashMap<NodeId, PeerState>>>,
         inbound_tx: mpsc::Sender<InboundMessage>,
     ) {
+        tracing::info!(
+            remote = ?remote_node_id,
+            "Iroh: setting up connection streams (registering peer, spawning reader/writer)"
+        );
         let (outbound_tx, outbound_rx) = mpsc::channel::<Vec<u8>>(256);
 
         // Register the peer.
         {
             let mut guard = peers.lock().await;
             guard.insert(remote_node_id, PeerState { outbound_tx });
+            tracing::info!(
+                remote = ?remote_node_id,
+                peer_count = guard.len(),
+                "Iroh: peer registered, total connected peers"
+            );
         }
 
         // Spawn writer task.
@@ -370,7 +472,18 @@ impl Transport for IrohTransport {
     }
 
     async fn connect(&self, addr: &PeerAddr) -> Result<(), TransportError> {
+        tracing::info!(
+            node_id = ?addr.node_id,
+            addresses = ?addr.addresses,
+            "Iroh: starting connect attempt"
+        );
+
         let iroh_node_id = node_id_to_iroh_pubkey(&addr.node_id).map_err(|e| {
+            tracing::error!(
+                node_id = ?addr.node_id,
+                error = %e,
+                "Iroh: node_id_to_iroh_pubkey conversion FAILED"
+            );
             TransportError::ConnectionFailed {
                 peer: format!("{:?}", addr.node_id),
                 reason: format!("invalid node ID for Iroh: {e}"),
@@ -378,9 +491,17 @@ impl Transport for IrohTransport {
         })?;
 
         let node_addr = if addr.addresses.is_empty() {
+            tracing::info!(
+                "Iroh: no direct addresses provided, relying on discovery/relay"
+            );
             // If no addresses are provided, rely on Iroh's discovery.
             EndpointAddr::new(iroh_node_id)
         } else {
+            tracing::info!(
+                address_count = addr.addresses.len(),
+                addresses = ?addr.addresses,
+                "Iroh: using provided direct addresses"
+            );
             // Parse socket addresses from the PeerAddr.
             let ip_addrs = addr
                 .addresses
@@ -390,17 +511,32 @@ impl Transport for IrohTransport {
             EndpointAddr::from_parts(iroh_node_id, ip_addrs)
         };
 
+        tracing::info!(
+            alpn = ?EPHEMERA_ALPN,
+            "Iroh: calling endpoint.connect()"
+        );
+
         let connection = self
             .endpoint
             .connect(node_addr, EPHEMERA_ALPN)
             .await
-            .map_err(|e| TransportError::ConnectionFailed {
-                peer: format!("{:?}", addr.node_id),
-                reason: format!("Iroh connect failed: {e}"),
+            .map_err(|e| {
+                tracing::error!(
+                    error = %e,
+                    node_id = ?addr.node_id,
+                    "Iroh: endpoint.connect() FAILED"
+                );
+                TransportError::ConnectionFailed {
+                    peer: format!("{:?}", addr.node_id),
+                    reason: format!("Iroh connect failed: {e}"),
+                }
             })?;
 
         let remote_node_id = addr.node_id;
-        tracing::info!(?remote_node_id, "outbound Iroh connection established");
+        tracing::info!(
+            remote = ?remote_node_id,
+            "Iroh: connection established!"
+        );
 
         Self::setup_connection(
             connection,
@@ -491,5 +627,142 @@ mod tests {
                 eprintln!("Iroh transport creation failed (may be expected in CI)");
             }
         }
+    }
+
+    /// End-to-end connectivity test: two IrohTransport instances connect
+    /// using only NodeId (no address hints), send a message, and verify
+    /// receipt. This tests the full Iroh discovery + relay pipeline.
+    ///
+    /// If this test fails, Iroh relay discovery is broken and cross-device
+    /// connections will never work.
+    #[tokio::test]
+    async fn test_iroh_two_transports_connect_and_message() {
+        // Use different deterministic keys for the two endpoints.
+        let secret_a = [1u8; 32];
+        let secret_b = [2u8; 32];
+
+        let t_a = match IrohTransport::with_secret_key(secret_a).await {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("Skipping: Iroh transport A creation failed: {e}");
+                return;
+            }
+        };
+        let t_b = match IrohTransport::with_secret_key(secret_b).await {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("Skipping: Iroh transport B creation failed: {e}");
+                t_a.shutdown().await;
+                return;
+            }
+        };
+
+        let node_id_a = t_a.local_node_id;
+        let node_id_b = t_b.local_node_id;
+        eprintln!("Transport A NodeId: {node_id_a}");
+        eprintln!("Transport B NodeId: {node_id_b}");
+        assert_ne!(node_id_a, node_id_b, "two different keys must produce different NodeIds");
+
+        // Give Pkarr publisher a moment to propagate the relay URLs.
+        // The online() wait ensures relay is connected, but the DNS
+        // record may take a beat to be queryable.
+        tokio::time::sleep(Duration::from_secs(3)).await;
+
+        // B connects to A using only A's NodeId (no address hints).
+        // This exercises the full discovery pipeline: B's endpoint asks
+        // DNS for A's relay URL, then connects through the relay.
+        let connect_result = tokio::time::timeout(
+            Duration::from_secs(30),
+            t_b.connect(&PeerAddr {
+                node_id: node_id_a,
+                addresses: vec![],
+            }),
+        )
+        .await;
+
+        match connect_result {
+            Ok(Ok(())) => {
+                eprintln!("B connected to A via NodeId-only discovery!");
+            }
+            Ok(Err(e)) => {
+                eprintln!("Connect FAILED: {e}");
+                t_a.shutdown().await;
+                t_b.shutdown().await;
+                panic!("Iroh connect by NodeId failed: {e}");
+            }
+            Err(_) => {
+                t_a.shutdown().await;
+                t_b.shutdown().await;
+                panic!(
+                    "Iroh connect TIMED OUT after 30s. \
+                     Discovery/relay pipeline is not working."
+                );
+            }
+        }
+
+        // Verify peer counts.
+        // B should see A as connected.
+        assert!(
+            t_b.is_connected(&node_id_a),
+            "B should show A as connected after outbound connect"
+        );
+
+        // A's accept loop should have picked up the inbound connection.
+        // Give it a moment to register.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(
+            t_a.is_connected(&node_id_b),
+            "A should show B as connected after accepting inbound"
+        );
+
+        // Send a message from A to B.
+        let test_payload = b"hello from A to B";
+        t_a.send(&node_id_b, test_payload)
+            .await
+            .expect("send from A to B should succeed");
+
+        // B receives the message.
+        let recv_result = tokio::time::timeout(Duration::from_secs(10), t_b.recv()).await;
+
+        match recv_result {
+            Ok(Ok((sender, data))) => {
+                assert_eq!(sender, node_id_a, "sender should be A");
+                assert_eq!(data, test_payload, "payload should match");
+                eprintln!("B received message from A: {:?}", String::from_utf8_lossy(&data));
+            }
+            Ok(Err(e)) => {
+                panic!("recv failed: {e}");
+            }
+            Err(_) => {
+                panic!("recv timed out after 10s");
+            }
+        }
+
+        // Send a message from B to A.
+        let reply_payload = b"reply from B to A";
+        t_b.send(&node_id_a, reply_payload)
+            .await
+            .expect("send from B to A should succeed");
+
+        let recv_result = tokio::time::timeout(Duration::from_secs(10), t_a.recv()).await;
+
+        match recv_result {
+            Ok(Ok((sender, data))) => {
+                assert_eq!(sender, node_id_b, "sender should be B");
+                assert_eq!(data, reply_payload, "payload should match");
+                eprintln!("A received reply from B: {:?}", String::from_utf8_lossy(&data));
+            }
+            Ok(Err(e)) => {
+                panic!("recv failed: {e}");
+            }
+            Err(_) => {
+                panic!("recv timed out after 10s");
+            }
+        }
+
+        eprintln!("Full bidirectional communication verified!");
+
+        t_a.shutdown().await;
+        t_b.shutdown().await;
     }
 }

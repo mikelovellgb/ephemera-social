@@ -392,6 +392,12 @@ impl ServiceContainer {
             tracing::info!("re-spawned moderation ingest loop on new Iroh network");
         }
 
+        tracing::info!("Iroh upgrade: gossip re-subscribed, ingest loops re-spawned");
+        tracing::info!(
+            peer_count = new_net.peer_count(),
+            "Iroh upgrade: current peer count after upgrade"
+        );
+
         // Store the new handles.
         if let Ok(mut guard) = self.ingest_handles.lock() {
             *guard = new_handles;
@@ -401,11 +407,12 @@ impl ServiceContainer {
         // dead gossip subscriptions get dropped when the Arc refcount hits 0.
         if let Ok(mut guard) = self.network.lock() {
             if guard.is_some() {
-                tracing::debug!("replacing old TCP network subsystem");
+                tracing::info!("Iroh upgrade: replacing old TCP network subsystem with Iroh");
             }
             *guard = Some(new_net);
         }
 
+        tracing::info!("Iroh upgrade: network upgrade complete");
         Ok(true)
     }
 
