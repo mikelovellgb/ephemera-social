@@ -495,6 +495,35 @@ fn retrieve_dht_dead_drops(
     }
 }
 
+/// Contact reconnect interval: every 60 seconds.
+const CONTACT_RECONNECT_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Periodically try to establish Iroh connections to contacts that are
+/// not yet connected as transport peers.
+///
+/// Runs every 60 seconds. For each contact with `status = 'connected'`
+/// in the database, checks if a transport-level connection exists. If
+/// not, attempts to connect via `network.connect_to_peer()`. This
+/// handles the case where a contact comes online after our node started.
+pub async fn contact_reconnect_loop(
+    services: Arc<ServiceContainer>,
+    mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
+) {
+    let mut interval = tokio::time::interval(CONTACT_RECONNECT_INTERVAL);
+
+    loop {
+        tokio::select! {
+            _ = interval.tick() => {
+                services.auto_connect_to_contacts().await;
+            }
+            _ = shutdown_rx.changed() => {
+                tracing::debug!("contact reconnect loop shutting down");
+                break;
+            }
+        }
+    }
+}
+
 /// Apply time-based decay to all tracked reputation scores.
 ///
 /// Runs daily. Multiplies accumulated positive and negative points by

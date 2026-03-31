@@ -449,7 +449,124 @@ impl ServiceContainer {
         }
 
         tracing::info!("Iroh upgrade: network upgrade complete");
+
+        // Auto-connect to all known contacts now that Iroh is live.
+        self.auto_connect_to_contacts().await;
+
         Ok(true)
+    }
+
+    /// Try to establish Iroh network connections to all contacts with
+    /// status = 'connected' in the SQLite database.
+    ///
+    /// For each contact whose pubkey is not already in the transport's
+    /// connected-peer set, we call `network.connect_to_peer()` with an
+    /// empty address list (Iroh will use relay/discovery). Failures are
+    /// logged at debug level and silently skipped — the peer may simply
+    /// be offline.
+    pub async fn auto_connect_to_contacts(&self) {
+        // 1. Get our local identity. If locked, nothing to do.
+        let local_key = match self.identity.get_signing_keypair() {
+            Ok(kp) => kp.public_key(),
+            Err(_) => {
+                tracing::debug!("auto_connect: identity locked, skipping");
+                return;
+            }
+        };
+
+        // 2. Query all contacts with status = 'connected'.
+        let contact_pubkeys: Vec<[u8; 32]> = {
+            let db = match self.metadata_db.lock() {
+                Ok(d) => d,
+                Err(_) => return,
+            };
+            let local_bytes = local_key.as_bytes().to_vec();
+            let mut stmt = match db.conn().prepare(
+                "SELECT remote_pubkey FROM connections \
+                 WHERE local_pubkey = ?1 AND status = 'connected'",
+            ) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(error = %e, "auto_connect: failed to prepare query");
+                    return;
+                }
+            };
+            let rows = match stmt.query_map(rusqlite::params![local_bytes], |row| {
+                let bytes: Vec<u8> = row.get(0)?;
+                Ok(bytes)
+            }) {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(error = %e, "auto_connect: query failed");
+                    return;
+                }
+            };
+            rows.filter_map(|r| r.ok())
+                .filter_map(|bytes| {
+                    if bytes.len() == 32 {
+                        let mut arr = [0u8; 32];
+                        arr.copy_from_slice(&bytes);
+                        Some(arr)
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+        // DB lock is dropped here.
+
+        if contact_pubkeys.is_empty() {
+            return;
+        }
+
+        // 3. Get a reference to the network.
+        let network = match self.network.lock() {
+            Ok(guard) => match guard.clone() {
+                Some(net) => net,
+                None => return,
+            },
+            Err(_) => return,
+        };
+
+        // 4. Connect to each contact that isn't already a transport peer.
+        let mut attempted = 0u32;
+        let mut succeeded = 0u32;
+        for pubkey_bytes in &contact_pubkeys {
+            let node_id = NodeId::from_bytes(*pubkey_bytes);
+            if network.is_connected(&node_id) {
+                continue;
+            }
+
+            let peer_addr = ephemera_transport::PeerAddr {
+                node_id,
+                addresses: vec![],
+            };
+            attempted += 1;
+            match network.connect_to_peer(&peer_addr).await {
+                Ok(()) => {
+                    let hex_id = hex::encode(pubkey_bytes);
+                    tracing::info!(node_id = %hex_id, "auto-connected to contact");
+                    succeeded += 1;
+                }
+                Err(e) => {
+                    let hex_id = hex::encode(pubkey_bytes);
+                    tracing::debug!(
+                        node_id = %hex_id,
+                        error = %e,
+                        "failed to auto-connect (peer may be offline)"
+                    );
+                }
+            }
+        }
+
+        if attempted > 0 {
+            tracing::info!(
+                attempted,
+                succeeded,
+                total_contacts = contact_pubkeys.len(),
+                "auto-connect to contacts completed"
+            );
+        }
     }
 
     /// How long the node has been running, in seconds.

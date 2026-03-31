@@ -535,6 +535,18 @@ impl EphemeraNode {
             tracing::info!("spawned profile refresh task");
         }
 
+        // 10. Contact reconnect loop: try to connect to contacts every 60s.
+        //     On Iroh, each contact's pubkey IS their NodeId, so we can
+        //     connect without knowing their IP address.
+        {
+            let shutdown_rx = self.shutdown.subscribe();
+            let services = Arc::clone(&self.services);
+            tokio::spawn(async move {
+                background::contact_reconnect_loop(services, shutdown_rx).await;
+            });
+            tracing::info!("spawned contact reconnect task");
+        }
+
         self.running = true;
         tracing::info!("ephemera node started");
 
