@@ -9,7 +9,7 @@
 //! When using Iroh transport, connecting by `node_id` alone is preferred
 //! because Iroh will resolve the peer's address via relay/discovery.
 
-use crate::network::{NetworkSubsystem, TransportKind};
+use crate::network::{NetworkSubsystem, RelayState, TransportKind};
 use crate::rpc::{error_codes, JsonRpcError, Router};
 use crate::services::ServiceContainer;
 use ephemera_transport::PeerAddr;
@@ -189,12 +189,13 @@ pub fn register_network(router: &mut Router, network: &Arc<NetworkSubsystem>) {
     });
 
     // network.status() -- comprehensive diagnostic: transport, node_id,
-    // peer_count, iroh availability, and any error.
+    // peer_count, iroh availability, relay status, and any error.
     let net = Arc::clone(network);
     router.register("network.status", move |_params| {
         let net = Arc::clone(&net);
         async move {
             let kind = net.transport_kind();
+            let relay = net.relay_state();
             let transport_name = match kind {
                 TransportKind::Tcp => "tcp",
                 #[cfg(feature = "iroh-transport")]
@@ -205,11 +206,17 @@ pub fn register_network(router: &mut Router, network: &Arc<NetworkSubsystem>) {
                 TransportKind::Iroh => true,
                 _ => false,
             };
+            let relay_status = match relay {
+                RelayState::Connected => "connected",
+                RelayState::Unavailable => "unavailable",
+                RelayState::NotApplicable => "not_applicable",
+            };
             Ok(serde_json::json!({
                 "transport": transport_name,
                 "node_id": net.local_id().to_string(),
                 "peer_count": net.peer_count(),
                 "iroh_available": iroh_available,
+                "relay_status": relay_status,
                 "error": Value::Null,
             }))
         }
@@ -253,6 +260,7 @@ pub fn register_network_stubs(router: &mut Router) {
                 "node_id": Value::Null,
                 "peer_count": 0,
                 "iroh_available": false,
+                "relay_status": "not_applicable",
                 "error": "network subsystem not available — unlock identity and restart node",
             }))
         }
@@ -292,18 +300,25 @@ pub fn register_network_dynamic(router: &mut Router, services: &Arc<ServiceConta
             match &*guard {
                 Some(net) => {
                     let kind = net.transport_kind();
-                    tracing::debug!(?kind, "network.status: reporting transport kind");
+                    let relay = net.relay_state();
+                    tracing::debug!(?kind, ?relay, "network.status: reporting transport kind");
                     let transport_name = match kind {
                         TransportKind::Tcp => "tcp",
                         #[cfg(feature = "iroh-transport")]
                         TransportKind::Iroh => "iroh",
                     };
                     let iroh_available = matches!(kind, TransportKind::Iroh);
+                    let relay_status = match relay {
+                        RelayState::Connected => "connected",
+                        RelayState::Unavailable => "unavailable",
+                        RelayState::NotApplicable => "not_applicable",
+                    };
                     Ok(serde_json::json!({
                         "transport": transport_name,
                         "node_id": net.local_id().to_string(),
                         "peer_count": net.peer_count(),
                         "iroh_available": iroh_available,
+                        "relay_status": relay_status,
                         "error": Value::Null,
                     }))
                 }
@@ -312,6 +327,7 @@ pub fn register_network_dynamic(router: &mut Router, services: &Arc<ServiceConta
                     "node_id": Value::Null,
                     "peer_count": 0,
                     "iroh_available": false,
+                    "relay_status": "not_applicable",
                     "error": "network not started — unlock identity",
                 })),
             }

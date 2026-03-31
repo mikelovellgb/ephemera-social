@@ -44,6 +44,20 @@ const MAX_FRAME_SIZE: u32 = 1_048_576;
 /// won't have happened yet and remote peers can't find us.
 const ONLINE_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// Whether the Iroh relay server was successfully connected.
+///
+/// This is tracked separately from the transport itself because some
+/// networks (e.g. mobile with no IPv6) cannot reach the relay servers.
+/// In that case the transport is still usable for direct IP connections,
+/// but NAT traversal and discovery-based connections will not work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelayStatus {
+    /// Relay connected and working -- NAT traversal is available.
+    Connected,
+    /// Relay connection timed out -- only direct IP connections work.
+    TimedOut,
+}
+
 /// Internal message routed from an Iroh connection reader task.
 struct InboundMessage {
     sender: NodeId,
@@ -74,6 +88,8 @@ pub struct IrohTransport {
     inbound_rx: Arc<Mutex<mpsc::Receiver<InboundMessage>>>,
     /// Handle to the background accept loop.
     _accept_task: Option<tokio::task::JoinHandle<()>>,
+    /// Whether the relay server was successfully connected.
+    relay_status: RelayStatus,
 }
 
 impl IrohTransport {
@@ -103,7 +119,7 @@ impl IrohTransport {
         // Wait for the endpoint to connect to at least one relay server.
         // This is CRITICAL: without this, the Pkarr publisher hasn't
         // announced our relay URL yet, so no one can discover us.
-        Self::wait_online(&endpoint, &local_node_id).await?;
+        let relay_status = Self::wait_online(&endpoint, &local_node_id).await;
 
         let (inbound_tx, inbound_rx) = mpsc::channel(1024);
         let peers: Arc<Mutex<HashMap<NodeId, PeerState>>> =
@@ -120,7 +136,8 @@ impl IrohTransport {
 
         tracing::info!(
             node_id = %local_node_id,
-            "Iroh transport created and online"
+            ?relay_status,
+            "Iroh transport created"
         );
 
         Ok(Self {
@@ -130,6 +147,7 @@ impl IrohTransport {
             inbound_tx,
             inbound_rx: Arc::new(Mutex::new(inbound_rx)),
             _accept_task: Some(accept_task),
+            relay_status,
         })
     }
 
@@ -157,7 +175,7 @@ impl IrohTransport {
         );
 
         // Wait for relay connectivity -- same reason as in `new()`.
-        Self::wait_online(&endpoint, &local_node_id).await?;
+        let relay_status = Self::wait_online(&endpoint, &local_node_id).await;
 
         let (inbound_tx, inbound_rx) = mpsc::channel(1024);
         let peers: Arc<Mutex<HashMap<NodeId, PeerState>>> =
@@ -173,7 +191,8 @@ impl IrohTransport {
 
         tracing::info!(
             node_id = %local_node_id,
-            "Iroh transport created and online (deterministic key)"
+            ?relay_status,
+            "Iroh transport created (deterministic key)"
         );
 
         Ok(Self {
@@ -183,6 +202,7 @@ impl IrohTransport {
             inbound_tx,
             inbound_rx: Arc::new(Mutex::new(inbound_rx)),
             _accept_task: Some(accept_task),
+            relay_status,
         })
     }
 
@@ -199,18 +219,26 @@ impl IrohTransport {
         &self.endpoint
     }
 
+    /// Whether the relay server was successfully connected.
+    ///
+    /// When [`RelayStatus::TimedOut`], NAT traversal and discovery-based
+    /// connections are unavailable. The user should connect to peers by
+    /// entering their IP:port directly.
+    pub fn relay_status(&self) -> RelayStatus {
+        self.relay_status
+    }
+
     /// Wait for the Iroh endpoint to go "online" (connected to a relay
-    /// server) with a timeout. This ensures:
+    /// server) with a timeout. Returns [`RelayStatus::Connected`] if the
+    /// relay was reached, or [`RelayStatus::TimedOut`] if not.
     ///
-    /// 1. Our relay URL is known so PkarrPublisher can announce it.
-    /// 2. We can relay-forward packets to/from peers behind NATs.
-    ///
-    /// Without this wait, `connect()` to a NodeId-only address will fail
-    /// because neither side has published their relay URL to discovery yet.
+    /// This never fails hard -- the transport is still usable for direct
+    /// IP connections even when the relay is unreachable (e.g. on mobile
+    /// networks that lack IPv6 connectivity to the relay servers).
     async fn wait_online(
         endpoint: &Endpoint,
         local_node_id: &NodeId,
-    ) -> Result<(), TransportError> {
+    ) -> RelayStatus {
         match tokio::time::timeout(ONLINE_TIMEOUT, endpoint.online()).await {
             Ok(()) => {
                 tracing::info!(
@@ -226,20 +254,20 @@ impl IrohTransport {
                     "Iroh endpoint address after going online"
                 );
 
-                Ok(())
+                RelayStatus::Connected
             }
             Err(_) => {
                 tracing::warn!(
                     node_id = %local_node_id,
                     timeout_secs = ONLINE_TIMEOUT.as_secs(),
-                    "Iroh endpoint did NOT go online within timeout. \
-                     Continuing anyway, but peer discovery may not work \
-                     until a relay connection is established."
+                    "Iroh relay connection TIMED OUT. This usually means the \
+                     network cannot reach the relay server (e.g. IPv6 not \
+                     available on this network). Direct IP connections still \
+                     work, but NAT traversal and discovery are unavailable. \
+                     Users should connect by entering peer IP:port directly."
                 );
-                // Don't fail hard -- the node can still function for
-                // local connections. But discovery-based connects will
-                // likely fail until the relay comes up.
-                Ok(())
+
+                RelayStatus::TimedOut
             }
         }
     }

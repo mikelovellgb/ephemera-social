@@ -2013,18 +2013,10 @@ textarea.input-field {
     opacity: 0.8;
 }
 
-.avatar-file-input {
-    position: absolute;
-    top: 0;
-    left: 0;
-    width: 100%;
-    height: 100%;
-    opacity: 0;
-    cursor: pointer;
-    z-index: 10;
-    /* Ensure it captures taps on mobile WebViews */
-    -webkit-tap-highlight-color: transparent;
-}
+/* Avatar upload uses a <label> wrapping a hidden <input type="file">.
+   The .avatar-file-input class is no longer used -- the input is
+   display:none inside the label, and the browser opens the file picker
+   natively when any part of the label is tapped. */
 
 .profile-avatar-edit-hint {
     position: absolute;

@@ -9,7 +9,7 @@
 //! replaces the Arc inside the Mutex.
 
 use crate::debug_log::DebugLogHandle;
-use crate::network::TransportKind;
+use crate::network::{RelayState, TransportKind};
 use crate::rpc::{error_codes, JsonRpcError, Router};
 use crate::services::ServiceContainer;
 use serde_json::Value;
@@ -65,7 +65,7 @@ pub fn register_meta(
     router.register("meta.status", move |_params| {
         let svc = Arc::clone(&svc);
         async move {
-            let (node_id, peer_count, transport_tier, network_status) =
+            let (node_id, peer_count, transport_tier, network_status, relay_status) =
                 match svc.network.lock() {
                     Ok(guard) => match &*guard {
                         Some(net) => {
@@ -75,11 +75,17 @@ pub fn register_meta(
                                 #[cfg(feature = "iroh-transport")]
                                 TransportKind::Iroh => "T1",
                             };
+                            let relay = match net.relay_state() {
+                                RelayState::Connected => "connected",
+                                RelayState::Unavailable => "unavailable",
+                                RelayState::NotApplicable => "not_applicable",
+                            };
                             (
                                 net.local_id().to_string(),
                                 net.peer_count(),
                                 tier,
                                 "connected",
+                                relay,
                             )
                         }
                         None => (
@@ -87,6 +93,7 @@ pub fn register_meta(
                             0,
                             "T2",
                             "disconnected",
+                            "not_applicable",
                         ),
                     },
                     Err(_) => (
@@ -94,6 +101,7 @@ pub fn register_meta(
                         0,
                         "T2",
                         "disconnected",
+                        "not_applicable",
                     ),
                 };
 
@@ -106,6 +114,7 @@ pub fn register_meta(
                 "storage_used_bytes": 0,
                 "storage_cap_bytes": 524_288_000_u64,
                 "network_status": network_status,
+                "relay_status": relay_status,
                 "sync_status": "idle",
             }))
         }
@@ -168,10 +177,16 @@ pub fn register_meta(
                             TransportKind::Iroh => true,
                             _ => false,
                         };
+                        let relay_status = match n.relay_state() {
+                            RelayState::Connected => "connected",
+                            RelayState::Unavailable => "unavailable",
+                            RelayState::NotApplicable => "not_applicable",
+                        };
                         serde_json::json!({
                             "transport": transport_name,
                             "node_id": n.local_id().to_string(),
                             "relay": Value::Null,
+                            "relay_status": relay_status,
                             "peer_count": n.peer_count(),
                             "iroh_active": iroh_active,
                         })
@@ -181,6 +196,7 @@ pub fn register_meta(
                             "transport": "none",
                             "node_id": Value::Null,
                             "relay": Value::Null,
+                            "relay_status": "not_applicable",
                             "peer_count": 0,
                             "iroh_active": false,
                         })
@@ -191,6 +207,7 @@ pub fn register_meta(
                         "transport": "none",
                         "node_id": Value::Null,
                         "relay": Value::Null,
+                        "relay_status": "not_applicable",
                         "peer_count": 0,
                         "iroh_active": false,
                     })

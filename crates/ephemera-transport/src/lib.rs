@@ -34,7 +34,7 @@ pub use peer::PeerRegistry;
 pub use tcp::TcpTransport;
 
 #[cfg(feature = "iroh-transport")]
-pub use iroh_transport::IrohTransport;
+pub use iroh_transport::{IrohTransport, RelayStatus};
 
 use async_trait::async_trait;
 use ephemera_types::NodeId;

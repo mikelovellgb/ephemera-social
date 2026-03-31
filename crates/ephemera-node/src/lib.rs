@@ -207,22 +207,33 @@ impl EphemeraNode {
         // identity's Ed25519 secret so that sharing your public key IS sharing
         // your network address.
         //
-        // When the identity is locked (no secret key available) or the feature
-        // is disabled, fall back to plain TCP.
+        // When the identity is locked (no secret key available), the Iroh
+        // transport fails to initialize, or the feature is disabled, fall back
+        // to plain TCP gracefully. The user is informed via relay_state.
         #[cfg(feature = "iroh-transport")]
         let network = {
             match self.derive_secret_key_bytes() {
                 Some(secret_key_bytes) => {
-                    let net = NetworkSubsystem::new_iroh_with_key(secret_key_bytes)
-                        .await
-                        .map_err(|e| StartupError::Transport {
-                            reason: format!("Iroh transport failed: {e}"),
-                        })?;
-                    tracing::info!(
-                        node_id = %net.local_id(),
-                        "network subsystem created (Iroh, deterministic key)"
-                    );
-                    Arc::new(net)
+                    match NetworkSubsystem::new_iroh_with_key(secret_key_bytes).await {
+                        Ok(net) => {
+                            tracing::info!(
+                                node_id = %net.local_id(),
+                                relay_state = ?net.relay_state(),
+                                "network subsystem created (Iroh, deterministic key)"
+                            );
+                            Arc::new(net)
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                "Iroh transport failed to initialize — falling \
+                                 back to TCP. NAT traversal unavailable. Users \
+                                 must connect by IP:port."
+                            );
+                            let node_id = self.derive_node_id();
+                            Arc::new(NetworkSubsystem::new(node_id))
+                        }
+                    }
                 }
                 None => {
                     tracing::warn!(

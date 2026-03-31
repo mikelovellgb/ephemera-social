@@ -24,6 +24,20 @@ pub enum TransportKind {
     Iroh,
 }
 
+/// Relay connection status for the Iroh transport.
+///
+/// When the relay is unavailable (e.g. on mobile networks without IPv6),
+/// the node falls back to direct IP connections only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelayState {
+    /// Relay is connected -- NAT traversal and discovery work.
+    Connected,
+    /// Relay timed out -- only direct IP:port connections work.
+    Unavailable,
+    /// Not applicable (TCP transport, no relay involved).
+    NotApplicable,
+}
+
 /// Network subsystem for the Ephemera node.
 ///
 /// Owns the transport and gossip service. Provides methods for:
@@ -46,6 +60,8 @@ pub struct NetworkSubsystem {
     /// TCP transport reference (kept for TCP-specific operations like `listen`).
     /// `None` when using Iroh backend.
     tcp_transport: Option<Arc<TcpTransport>>,
+    /// Relay connection state (Iroh only).
+    relay_state: RelayState,
 }
 
 impl NetworkSubsystem {
@@ -62,6 +78,7 @@ impl NetworkSubsystem {
             gossip,
             kind: TransportKind::Tcp,
             tcp_transport: Some(transport),
+            relay_state: RelayState::NotApplicable,
         }
     }
 
@@ -73,6 +90,10 @@ impl NetworkSubsystem {
     pub async fn new_iroh() -> Result<Self, ephemera_transport::TransportError> {
         let iroh = ephemera_transport::IrohTransport::new().await?;
         let local_id = NodeId::from_bytes(*iroh.endpoint().id().as_bytes());
+        let relay_state = match iroh.relay_status() {
+            ephemera_transport::RelayStatus::Connected => RelayState::Connected,
+            ephemera_transport::RelayStatus::TimedOut => RelayState::Unavailable,
+        };
         let transport = Arc::new(iroh);
         let gossip = EagerGossipService::new(local_id, Arc::clone(&transport));
         Ok(Self {
@@ -81,6 +102,7 @@ impl NetworkSubsystem {
             gossip,
             kind: TransportKind::Iroh,
             tcp_transport: None,
+            relay_state,
         })
     }
 
@@ -92,6 +114,10 @@ impl NetworkSubsystem {
     ) -> Result<Self, ephemera_transport::TransportError> {
         let iroh = ephemera_transport::IrohTransport::with_secret_key(secret_key).await?;
         let local_id = NodeId::from_bytes(*iroh.endpoint().id().as_bytes());
+        let relay_state = match iroh.relay_status() {
+            ephemera_transport::RelayStatus::Connected => RelayState::Connected,
+            ephemera_transport::RelayStatus::TimedOut => RelayState::Unavailable,
+        };
         let transport = Arc::new(iroh);
         let gossip = EagerGossipService::new(local_id, Arc::clone(&transport));
         Ok(Self {
@@ -100,6 +126,7 @@ impl NetworkSubsystem {
             gossip,
             kind: TransportKind::Iroh,
             tcp_transport: None,
+            relay_state,
         })
     }
 
@@ -193,6 +220,16 @@ impl NetworkSubsystem {
     /// Which transport backend is active.
     pub fn transport_kind(&self) -> TransportKind {
         self.kind
+    }
+
+    /// Relay connection state.
+    ///
+    /// - [`RelayState::Connected`]: Iroh relay is working, NAT traversal available.
+    /// - [`RelayState::Unavailable`]: Iroh relay timed out (e.g. no IPv6), only
+    ///   direct IP connections work.
+    /// - [`RelayState::NotApplicable`]: TCP transport, no relay involved.
+    pub fn relay_state(&self) -> RelayState {
+        self.relay_state
     }
 
     /// Disconnect from a specific peer by node ID.

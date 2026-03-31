@@ -109,15 +109,19 @@
         });
         profileHeader.appendChild(gearBtn);
 
-        // Avatar with visible file input overlay (no programmatic click)
-        var avatarWrap = Ephemera.el('div', 'profile-avatar-wrap');
+        // Avatar upload using <label> wrapping a hidden <input type="file">.
+        // This is the most reliable pattern across all browsers and WebViews
+        // (including Android WebView) because the browser natively opens the
+        // file picker when any part of the <label> is tapped -- no JavaScript
+        // click() required.
+        var avatarLabel = document.createElement('label');
+        avatarLabel.className = 'profile-avatar-wrap';
+        avatarLabel.setAttribute('aria-label', 'Change profile photo');
 
-        // Transparent file input covers avatar area — browser handles tap natively
         var fileInput = document.createElement('input');
         fileInput.type = 'file';
         fileInput.accept = 'image/jpeg,image/png,image/webp';
-        fileInput.className = 'avatar-file-input';
-        fileInput.setAttribute('aria-label', 'Change profile photo');
+        fileInput.style.display = 'none';
 
         fileInput.addEventListener('change', function () {
             if (!fileInput.files || !fileInput.files[0]) return;
@@ -131,12 +135,12 @@
             fileInput.value = ''; // Reset for next selection
         });
 
-        avatarWrap.appendChild(fileInput);
-        avatarWrap.appendChild(Ephemera.avatar(identity.display_name || '?', 'avatar-2xl', identity.avatar_url || null));
+        avatarLabel.appendChild(fileInput);
+        avatarLabel.appendChild(Ephemera.avatar(identity.display_name || '?', 'avatar-2xl', identity.avatar_url || null));
         var editHint = Ephemera.el('div', 'profile-avatar-edit-hint');
         editHint.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>';
-        avatarWrap.appendChild(editHint);
-        profileHeader.appendChild(avatarWrap);
+        avatarLabel.appendChild(editHint);
+        profileHeader.appendChild(avatarLabel);
 
         // Display name (tappable to edit)
         var nameEl = Ephemera.el('div', 'profile-display-name', identity.display_name || 'Set your name');
@@ -1277,6 +1281,41 @@
             transportRow.appendChild(transportSpan);
             container.appendChild(transportRow);
 
+            // Relay status row (Iroh transport only)
+            var relayVal = status.relay_status || 'not_applicable';
+            if (transportVal === 'iroh' || transportVal === 'tcp') {
+                var relayRow = Ephemera.el('div', 'settings-row');
+                relayRow.appendChild(Ephemera.el('span', 'settings-row-label', 'Relay'));
+
+                var relayDisplay, relayColor;
+                if (relayVal === 'connected') {
+                    relayDisplay = 'Connected (NAT traversal active)';
+                    relayColor = 'var(--accent-green, #4caf50)';
+                } else if (relayVal === 'unavailable') {
+                    relayDisplay = 'Unavailable — connect by IP address';
+                    relayColor = 'var(--accent-warn, #ff9800)';
+                } else if (transportVal === 'tcp') {
+                    relayDisplay = 'N/A (TCP transport)';
+                    relayColor = 'var(--text-tertiary)';
+                } else {
+                    relayDisplay = 'N/A';
+                    relayColor = 'var(--text-tertiary)';
+                }
+                var relaySpan = Ephemera.el('span', 'settings-row-value', relayDisplay);
+                relaySpan.style.color = relayColor;
+                relaySpan.style.fontSize = 'var(--fs-xs)';
+                relayRow.appendChild(relaySpan);
+                container.appendChild(relayRow);
+            }
+
+            // Relay unavailable banner
+            if (relayVal === 'unavailable' || (transportVal === 'tcp' && relayVal !== 'connected')) {
+                var banner = Ephemera.el('div', '');
+                banner.style.cssText = 'background:rgba(255,152,0,0.1);border:1px solid var(--accent-warn, #ff9800);border-radius:8px;padding:10px 14px;margin:8px 0;font-size:var(--fs-sm);color:var(--text-secondary);';
+                banner.textContent = 'P2P relay unavailable on this network. Enter a peer\'s IP address below to connect directly.';
+                container.appendChild(banner);
+            }
+
             // Node ID row
             if (status.node_id) {
                 var nodeIdRow = Ephemera.el('div', 'settings-row');
@@ -1299,17 +1338,6 @@
             peerRow.appendChild(Ephemera.el('span', 'settings-row-label', 'Connected Peers'));
             peerRow.appendChild(Ephemera.el('span', 'settings-row-value', String(status.peer_count || 0)));
             container.appendChild(peerRow);
-
-            // Iroh availability row
-            var irohRow = Ephemera.el('div', 'settings-row');
-            irohRow.appendChild(Ephemera.el('span', 'settings-row-label', 'Iroh Available'));
-            var irohVal = status.iroh_available ? 'Yes' : 'No';
-            var irohSpan = Ephemera.el('span', 'settings-row-value', irohVal);
-            irohSpan.style.color = status.iroh_available
-                ? 'var(--accent-green, #4caf50)'
-                : 'var(--text-tertiary)';
-            irohRow.appendChild(irohSpan);
-            container.appendChild(irohRow);
 
             // Error row (if present)
             if (status.error) {
@@ -1409,8 +1437,16 @@
                 : ns.transport === 'tcp' ? '#ffb347'
                 : '#ff6b6b';
 
+            var relayLabel = ns.relay_status === 'connected' ? 'Connected'
+                : ns.relay_status === 'unavailable' ? 'Unavailable (no IPv6?)'
+                : 'N/A';
+            var relayColor = ns.relay_status === 'connected' ? '#3dd68c'
+                : ns.relay_status === 'unavailable' ? '#ffb347'
+                : undefined;
+
             var statusLines = [
                 { label: 'Transport', value: transportLabel, color: transportColor },
+                { label: 'Relay', value: relayLabel, color: relayColor },
                 { label: 'Node ID', value: ns.node_id ? (ns.node_id.length > 20 ? ns.node_id.slice(0, 10) + '...' : ns.node_id) : 'none' },
                 { label: 'Peers', value: String(ns.peer_count || 0) },
                 { label: 'Iroh Active', value: ns.iroh_active ? 'Yes' : 'No', color: ns.iroh_active ? '#3dd68c' : '#ff6b6b' },
