@@ -71,8 +71,11 @@
         avatarWrap.addEventListener('click', function () {
             var input = document.createElement('input');
             input.type = 'file';
-            input.accept = 'image/*';
+            input.accept = 'image/jpeg,image/png,image/webp';
+            input.style.cssText = 'position:fixed;top:-9999px;left:-9999px;opacity:0;';
+            document.body.appendChild(input); // Must be in DOM for some WebViews
             input.onchange = function () {
+                document.body.removeChild(input); // Clean up
                 if (!input.files || !input.files[0]) return;
                 var file = input.files[0];
                 if (file.size > 5 * 1024 * 1024) {
