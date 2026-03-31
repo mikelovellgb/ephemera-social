@@ -464,6 +464,11 @@ impl ServiceContainer {
     /// empty address list (Iroh will use relay/discovery). Failures are
     /// logged at debug level and silently skipped — the peer may simply
     /// be offline.
+    ///
+    /// IMPORTANT: We snapshot the connected-peer list once before the loop
+    /// to avoid attempting reverse connections to peers that already
+    /// connected to us inbound. A failed outbound attempt must NOT tear
+    /// down an existing inbound connection.
     pub async fn auto_connect_to_contacts(&self) {
         // 1. Get our local identity. If locked, nothing to do.
         let local_key = match self.identity.get_signing_keypair() {
@@ -528,12 +533,30 @@ impl ServiceContainer {
             Err(_) => return,
         };
 
-        // 4. Connect to each contact that isn't already a transport peer.
+        // 4. Snapshot the currently connected peers ONCE before the loop.
+        //    This catches inbound connections that may not match `is_connected()`
+        //    due to key format differences or mutex contention on try_lock().
+        let already_connected: Vec<NodeId> = network.connected_peers();
+
+        // 5. Connect to each contact that isn't already a transport peer.
         let mut attempted = 0u32;
         let mut succeeded = 0u32;
         for pubkey_bytes in &contact_pubkeys {
             let node_id = NodeId::from_bytes(*pubkey_bytes);
+
+            // Skip if already connected (either direction — inbound or outbound).
+            if already_connected.iter().any(|p| p == &node_id) {
+                tracing::debug!(
+                    node_id = %hex::encode(pubkey_bytes),
+                    "auto_connect: contact already connected (in peer list), skipping"
+                );
+                continue;
+            }
             if network.is_connected(&node_id) {
+                tracing::debug!(
+                    node_id = %hex::encode(pubkey_bytes),
+                    "auto_connect: contact already connected (is_connected), skipping"
+                );
                 continue;
             }
 
@@ -542,18 +565,34 @@ impl ServiceContainer {
                 addresses: vec![],
             };
             attempted += 1;
-            match network.connect_to_peer(&peer_addr).await {
-                Ok(()) => {
+
+            // Use a 10-second timeout. If the relay is working, connections
+            // establish in under 5 seconds. A 30+ second hang kills the
+            // reconnect loop and can tear down existing connections.
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                network.connect_to_peer(&peer_addr),
+            )
+            .await
+            {
+                Ok(Ok(())) => {
                     let hex_id = hex::encode(pubkey_bytes);
                     tracing::info!(node_id = %hex_id, "auto-connected to contact");
                     succeeded += 1;
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     let hex_id = hex::encode(pubkey_bytes);
                     tracing::debug!(
                         node_id = %hex_id,
                         error = %e,
                         "failed to auto-connect (peer may be offline)"
+                    );
+                }
+                Err(_) => {
+                    let hex_id = hex::encode(pubkey_bytes);
+                    tracing::debug!(
+                        node_id = %hex_id,
+                        "auto-connect timed out after 10s (peer may be offline)"
                     );
                 }
             }

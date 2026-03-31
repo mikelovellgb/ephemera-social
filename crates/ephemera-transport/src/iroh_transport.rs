@@ -334,21 +334,32 @@ impl IrohTransport {
     }
 
     /// Set up reader/writer tasks for an established QUIC connection.
+    ///
+    /// If a connection to this peer already exists (e.g. they connected to
+    /// us while we were also connecting to them), the new connection is
+    /// silently dropped and the existing one is kept. This prevents a
+    /// failed reverse-connect from tearing down a working inbound
+    /// connection.
     async fn setup_connection(
         connection: iroh::endpoint::Connection,
         remote_node_id: NodeId,
         peers: Arc<Mutex<HashMap<NodeId, PeerState>>>,
         inbound_tx: mpsc::Sender<InboundMessage>,
     ) {
-        tracing::info!(
-            remote = ?remote_node_id,
-            "Iroh: setting up connection streams (registering peer, spawning reader/writer)"
-        );
         let (outbound_tx, outbound_rx) = mpsc::channel::<Vec<u8>>(256);
 
-        // Register the peer.
+        // Register the peer — but only if not already connected.
         {
             let mut guard = peers.lock().await;
+            if guard.contains_key(&remote_node_id) {
+                tracing::info!(
+                    remote = ?remote_node_id,
+                    peer_count = guard.len(),
+                    "Iroh: peer already connected, keeping existing connection"
+                );
+                // Drop the new QUIC connection — the existing one is live.
+                return;
+            }
             guard.insert(remote_node_id, PeerState { outbound_tx });
             tracing::info!(
                 remote = ?remote_node_id,
@@ -363,19 +374,32 @@ impl IrohTransport {
         let writer_peer_id = remote_node_id;
         tokio::spawn(async move {
             Self::writer_loop(writer_conn, outbound_rx).await;
+            // Only remove the peer if no newer connection has replaced us.
+            // We check by verifying the outbound_tx is closed (our rx was
+            // consumed by writer_loop and is now dropped).
             let mut guard = peers_writer.lock().await;
-            guard.remove(&writer_peer_id);
-            tracing::info!(?writer_peer_id, "Iroh peer writer task ended");
+            if let Some(state) = guard.get(&writer_peer_id) {
+                // If the stored sender is closed, it means our reader also
+                // died and no replacement was inserted. Safe to remove.
+                if state.outbound_tx.is_closed() {
+                    guard.remove(&writer_peer_id);
+                    tracing::info!(?writer_peer_id, "Iroh peer writer task ended, peer removed");
+                } else {
+                    tracing::debug!(
+                        ?writer_peer_id,
+                        "Iroh peer writer task ended, but peer has active sender (replacement connection?) — not removing"
+                    );
+                }
+            }
         });
 
         // Spawn reader task.
         let reader_conn = connection;
-        let peers_reader = Arc::clone(&peers);
         let reader_peer_id = remote_node_id;
         tokio::spawn(async move {
             Self::reader_loop(reader_conn, reader_peer_id, inbound_tx).await;
-            let mut guard = peers_reader.lock().await;
-            guard.remove(&reader_peer_id);
+            // Reader ended — but don't blindly remove the peer. The writer
+            // cleanup handles removal. We just log.
             tracing::info!(?reader_peer_id, "Iroh peer reader task ended");
         });
     }
@@ -500,6 +524,21 @@ impl Transport for IrohTransport {
     }
 
     async fn connect(&self, addr: &PeerAddr) -> Result<(), TransportError> {
+        // Fast-path: if we already have a live connection to this peer
+        // (e.g. they connected inbound), skip the outbound attempt.
+        // This avoids a long timeout and prevents tearing down the
+        // existing connection.
+        {
+            let guard = self.peers.lock().await;
+            if guard.contains_key(&addr.node_id) {
+                tracing::debug!(
+                    node_id = ?addr.node_id,
+                    "Iroh: already connected to peer, skipping outbound connect"
+                );
+                return Ok(());
+            }
+        }
+
         tracing::info!(
             node_id = ?addr.node_id,
             addresses = ?addr.addresses,
