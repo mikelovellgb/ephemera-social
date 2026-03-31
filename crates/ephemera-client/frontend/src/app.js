@@ -206,8 +206,9 @@ var Ephemera = (function () {
         var mainContent = document.getElementById('main-content');
         if (!mainContent) return;
 
-        // Find matching route handler
-        var handler = routes[route];
+        // Find matching route handler (strip query params for lookup)
+        var routePath = route.split('?')[0];
+        var handler = routes[routePath];
         if (handler) {
             mainContent.innerHTML = '';
 

@@ -322,7 +322,7 @@ impl SocialService {
         }
 
         let delivered = published_gossip || published_dht;
-        let mut result = connection_to_json(&conn, Some(&local), None);
+        let mut result = connection_to_json(&conn, Some(&local), metadata_db);
         if let Some(obj) = result.as_object_mut() {
             obj.insert("published_gossip".to_string(), serde_json::json!(published_gossip));
             obj.insert("published_dht".to_string(), serde_json::json!(published_dht));
@@ -431,7 +431,7 @@ impl SocialService {
         }
 
         let delivered = published_gossip || published_dht;
-        let mut result = connection_to_json(&conn, Some(&local), None);
+        let mut result = connection_to_json(&conn, Some(&local), metadata_db);
         if let Some(obj) = result.as_object_mut() {
             obj.insert("published_gossip".to_string(), serde_json::json!(published_gossip));
             obj.insert("published_dht".to_string(), serde_json::json!(published_dht));

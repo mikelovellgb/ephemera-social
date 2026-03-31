@@ -159,6 +159,50 @@ fn register_identity(router: &mut Router, services: &Arc<ServiceContainer>) {
                 }
             }
 
+            // Publish the local profile to DHT on unlock so connected peers
+            // can discover our display_name. Best-effort, never fail unlock.
+            {
+                use crate::services::dht::DhtNodeService;
+                if let Ok(signing_kp) = svc.identity.get_signing_keypair() {
+                    let pubkey_hex = hex::encode(signing_kp.public_key().as_bytes());
+                    let pubkey_bytes = signing_kp.public_key().as_bytes().to_vec();
+
+                    // Read profile from local DB.
+                    let profile_data: Option<(Option<String>, Option<String>)> =
+                        if let Ok(db) = svc.metadata_db.lock() {
+                            db.conn()
+                                .query_row(
+                                    "SELECT display_name, bio FROM profiles WHERE pubkey = ?1",
+                                    rusqlite::params![pubkey_bytes],
+                                    |row| Ok((row.get(0)?, row.get(1)?)),
+                                )
+                                .ok()
+                        } else {
+                            None
+                        };
+
+                    if let Some((name, bio)) = profile_data {
+                        if name.is_some() || bio.is_some() {
+                            let profile_json = serde_json::json!({
+                                "pubkey": pubkey_hex,
+                                "display_name": name,
+                                "bio": bio,
+                            });
+                            if let Err(e) = DhtNodeService::store_profile(
+                                &pubkey_hex,
+                                &profile_json,
+                                &svc.identity,
+                                &svc.dht_storage,
+                            ) {
+                                tracing::warn!(error = %e, "failed to publish profile to DHT on unlock");
+                            } else {
+                                tracing::info!(pubkey = %pubkey_hex, "profile published to DHT on unlock");
+                            }
+                        }
+                    }
+                }
+            }
+
             Ok(result)
         }
     });

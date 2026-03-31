@@ -141,8 +141,7 @@
             var msgBtn = Ephemera.el('button', 'btn btn-primary btn-sm', 'Message');
             msgBtn.setAttribute('aria-label', 'Message ' + displayName);
             msgBtn.addEventListener('click', function () {
-                Ephemera.store.set({ messageTarget: conn.pseudonym_id });
-                Ephemera.navigate('/messages');
+                Ephemera.navigate('/messages?peer=' + encodeURIComponent(conn.pseudonym_id));
             });
             actions.appendChild(msgBtn);
 

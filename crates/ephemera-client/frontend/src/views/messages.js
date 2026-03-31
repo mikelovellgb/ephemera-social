@@ -669,8 +669,43 @@
     // Route
     // ================================================================
 
+    /**
+     * Open (or create) a 1:1 chat with the given peer pubkey.
+     * Constructs a minimal conversation object and renders the chat view.
+     */
+    function openChatWithPeer(container, peerPubkey) {
+        currentConversation = {
+            peer: peerPubkey,
+            peer_key: peerPubkey,
+            pseudonym_id: peerPubkey,
+            conversation_id: peerPubkey,
+            _isGroupChat: false,
+        };
+
+        // Try to fetch the peer's profile for display_name, then render chat
+        Ephemera.rpc('profiles.get', { pubkey: peerPubkey }).then(function (profile) {
+            if (profile && profile.display_name) {
+                currentConversation.peer_display_name = profile.display_name;
+                currentConversation.name = profile.display_name;
+            }
+            renderChatView(container);
+        }).catch(function () {
+            renderChatView(container);
+        });
+    }
+
     Ephemera.registerRoute('/messages', function (container) {
         currentConversation = null;
-        renderConversationList(container);
+
+        // Check for a peer query parameter (e.g. from "Message" button on connections)
+        var hashParts = window.location.hash.split('?');
+        var params = new URLSearchParams(hashParts[1] || '');
+        var autoPeer = params.get('peer');
+
+        if (autoPeer) {
+            openChatWithPeer(container, autoPeer);
+        } else {
+            renderConversationList(container);
+        }
     });
 })();
