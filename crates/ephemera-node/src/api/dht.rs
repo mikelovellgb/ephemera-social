@@ -110,7 +110,9 @@ pub fn register_dht(router: &mut Router, services: &Arc<ServiceContainer>) {
             let mut key = [0u8; 32];
             key.copy_from_slice(&key_bytes);
 
-            let result = DhtNodeService::get(&key, &svc.dht_storage)
+            // Try local DHT first, then query network on miss.
+            let result = crate::dht_query::query_network_dht(&key, &svc)
+                .await
                 .map_err(internal_error)?;
 
             match result {
@@ -127,45 +129,72 @@ pub fn register_dht(router: &mut Router, services: &Arc<ServiceContainer>) {
         }
     });
 
-    // dht.lookup_handle(name) -- find a handle via DHT
+    // dht.lookup_handle(name) -- find a handle via DHT (network-aware)
     let svc = Arc::clone(services);
     router.register("dht.lookup_handle", move |params| {
         let svc = Arc::clone(&svc);
         async move {
             let name = extract_str(&params, "name")?;
+            // Try local DHT first, then query network.
             let result = DhtNodeService::lookup_handle(&name, &svc.dht_storage)
                 .map_err(internal_error)?;
-            match result {
+            if let Some(val) = result {
+                return Ok(val);
+            }
+            // Network query.
+            let key = crate::services::dht::dht_key("handle", &name);
+            let net_result = crate::dht_query::query_network_dht(&key, &svc)
+                .await
+                .map_err(internal_error)?;
+            match net_result {
                 Some(val) => Ok(val),
                 None => Ok(Value::Null),
             }
         }
     });
 
-    // dht.lookup_prekey(pubkey) -- find a prekey bundle via DHT
+    // dht.lookup_prekey(pubkey) -- find a prekey bundle via DHT (network-aware)
     let svc = Arc::clone(services);
     router.register("dht.lookup_prekey", move |params| {
         let svc = Arc::clone(&svc);
         async move {
             let pubkey = extract_str(&params, "pubkey")?;
+            // Try local DHT first, then query network.
             let result = DhtNodeService::lookup_prekey(&pubkey, &svc.dht_storage)
                 .map_err(internal_error)?;
-            match result {
+            if let Some(val) = result {
+                return Ok(val);
+            }
+            // Network query.
+            let key = crate::services::dht::dht_key("prekey", &pubkey);
+            let net_result = crate::dht_query::query_network_dht(&key, &svc)
+                .await
+                .map_err(internal_error)?;
+            match net_result {
                 Some(val) => Ok(val),
                 None => Ok(Value::Null),
             }
         }
     });
 
-    // dht.lookup_profile(pubkey) -- find a profile via DHT
+    // dht.lookup_profile(pubkey) -- find a profile via DHT (network-aware)
     let svc = Arc::clone(services);
     router.register("dht.lookup_profile", move |params| {
         let svc = Arc::clone(&svc);
         async move {
             let pubkey = extract_str(&params, "pubkey")?;
+            // Try local DHT first, then query network.
             let result = DhtNodeService::lookup_profile(&pubkey, &svc.dht_storage)
                 .map_err(internal_error)?;
-            match result {
+            if let Some(val) = result {
+                return Ok(val);
+            }
+            // Network query.
+            let key = crate::services::dht::dht_key("profile", &pubkey);
+            let net_result = crate::dht_query::query_network_dht(&key, &svc)
+                .await
+                .map_err(internal_error)?;
+            match net_result {
                 Some(val) => Ok(val),
                 None => Ok(Value::Null),
             }

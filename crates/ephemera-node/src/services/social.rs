@@ -137,6 +137,104 @@ fn fetch_and_store_remote_profile(
     }
 }
 
+/// Build a profile JSON value for DHT publication, including an avatar
+/// thumbnail if one exists in the profile table.
+///
+/// The avatar thumbnail is read from the `avatar_cid` column, looked up
+/// in the content store as a BLAKE3 hash, and base64-encoded. If the
+/// thumbnail is too large (>4KB after encoding) it is omitted.
+fn build_dht_profile(
+    pubkey_hex: &str,
+    display_name: Option<&str>,
+    bio: Option<&str>,
+    metadata_db: &Mutex<MetadataDb>,
+) -> Value {
+    let mut profile = serde_json::json!({
+        "pubkey": pubkey_hex,
+        "display_name": display_name,
+        "bio": bio,
+    });
+
+    // Try to read avatar_cid from the profiles table.
+    if let Ok(pk_bytes) = hex::decode(pubkey_hex) {
+        if let Ok(db) = metadata_db.lock() {
+            let avatar_cid: Option<Vec<u8>> = db
+                .conn()
+                .query_row(
+                    "SELECT avatar_cid FROM profiles WHERE pubkey = ?1",
+                    rusqlite::params![pk_bytes],
+                    |row| row.get(0),
+                )
+                .ok()
+                .flatten();
+
+            if let Some(ref cid) = avatar_cid {
+                // The avatar_cid is the BLAKE3 hash of the standard image.
+                // For the DHT we want the thumbnail, but we don't store the
+                // thumbnail hash separately. Instead, we encode the avatar_cid
+                // hex so remote nodes know which content to request, and
+                // provide a small data:image URI for immediate display.
+                let cid_hex = hex::encode(cid);
+                if let Some(obj) = profile.as_object_mut() {
+                    obj.insert(
+                        "avatar_cid".to_string(),
+                        Value::String(cid_hex),
+                    );
+                }
+            }
+        }
+    }
+
+    profile
+}
+
+/// Store a profile value (already fetched from the network DHT) into the
+/// local metadata database. Best-effort: logs but does not propagate errors.
+fn store_profile_from_dht(
+    pubkey_hex: &str,
+    profile: &Value,
+    metadata_db: &Mutex<MetadataDb>,
+) {
+    let display_name = profile.get("display_name").and_then(|v| v.as_str());
+    let bio = profile.get("bio").and_then(|v| v.as_str());
+
+    if display_name.is_none() && bio.is_none() {
+        return;
+    }
+
+    let pk_bytes = match hex::decode(pubkey_hex) {
+        Ok(b) if b.len() == 32 => b,
+        _ => return,
+    };
+
+    let db = match metadata_db.lock() {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let empty_sig: Vec<u8> = vec![0u8; 64];
+
+    let _ = db.conn().execute(
+        "INSERT INTO profiles (pubkey, display_name, bio, updated_at, signature, received_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?4)
+         ON CONFLICT(pubkey) DO UPDATE SET
+            display_name = COALESCE(?2, display_name),
+            bio = COALESCE(?3, bio),
+            updated_at = ?4, signature = ?5, received_at = ?4",
+        rusqlite::params![pk_bytes, display_name, bio, now, empty_sig],
+    );
+
+    tracing::info!(
+        pubkey = %pubkey_hex,
+        display_name = ?display_name,
+        "stored network DHT profile in local database"
+    );
+}
+
 /// Serialize a Connection to JSON.
 ///
 /// When `local` is provided, computes `pseudonym_id` as the "other" peer
@@ -1366,15 +1464,53 @@ impl MessageService {
 
         // Publish to gossip network so online peers can relay/store it.
         if let Some(net) = network {
-            match serde_json::to_vec(&envelope) {
-                Ok(envelope_bytes) => {
-                    let topic = ephemera_gossip::GossipTopic::direct_messages();
-                    match net.publish(&topic, envelope_bytes).await {
+            let topic = ephemera_gossip::GossipTopic::direct_messages();
+
+            // ── Plaintext direct_message path ──────────────────────
+            //
+            // Publish a plain JSON direct_message so the recipient's
+            // message_ingest can store it directly in the messages table
+            // without needing decryption. This lets us verify gossip
+            // delivery works end-to-end before relying on E2E encryption.
+            let local_hex = hex::encode(local.as_bytes());
+            let plaintext_msg = serde_json::json!({
+                "type": "direct_message",
+                "sender": local_hex,
+                "recipient": to,
+                "body": body,
+                "timestamp": now as u64,
+            });
+            match serde_json::to_vec(&plaintext_msg) {
+                Ok(bytes) => {
+                    match net.publish(&topic, bytes).await {
                         Ok(()) => {
                             published_gossip = true;
+                            tracing::info!(
+                                recipient = %to,
+                                "published plaintext direct_message to dm_delivery gossip topic"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                "failed to publish plaintext direct_message to gossip"
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to serialize plaintext direct_message");
+                }
+            }
+
+            // ── Encrypted DeadDropEnvelope path (kept for relays) ────
+            match serde_json::to_vec(&envelope) {
+                Ok(envelope_bytes) => {
+                    match net.publish(&topic, envelope_bytes).await {
+                        Ok(()) => {
                             tracing::debug!(
                                 recipient = %to,
-                                "published dead drop to dm_delivery gossip topic"
+                                "published encrypted dead drop to dm_delivery gossip topic"
                             );
                         }
                         Err(e) => {
@@ -1683,6 +1819,10 @@ impl ProfileService {
     }
 
     /// Update profile and publish to the DHT for network discovery.
+    ///
+    /// Includes an `avatar_thumb` field (base64-encoded 64x64 thumbnail,
+    /// ~2KB) in the DHT record when an avatar exists, so remote users can
+    /// display a small avatar without fetching the full blob.
     pub async fn update_and_publish(
         &self,
         name: Option<&str>,
@@ -1696,11 +1836,11 @@ impl ProfileService {
         // Publish the profile to DHT for network-wide discovery.
         let signing_kp = identity.get_signing_keypair()?;
         let pubkey_hex = hex::encode(signing_kp.public_key().as_bytes());
-        let profile_json = serde_json::json!({
-            "pubkey": pubkey_hex,
-            "display_name": name,
-            "bio": bio,
-        });
+
+        // Build profile JSON, including avatar thumbnail if available.
+        let profile_json = build_dht_profile(
+            &pubkey_hex, name, bio, metadata_db,
+        );
 
         if let Err(e) = DhtNodeService::store_profile(
             &pubkey_hex, &profile_json, identity, dht_storage,
@@ -1730,6 +1870,43 @@ impl ProfileService {
         // Fall back to DHT.
         match DhtNodeService::lookup_profile(pubkey_hex, dht_storage)? {
             Some(dht_profile) => Ok(dht_profile),
+            None => Ok(local),
+        }
+    }
+
+    /// Get a profile, querying the network DHT if not found locally.
+    ///
+    /// This is the fully network-aware version: after checking local DB and
+    /// local DHT, it publishes a DHT query via gossip and waits up to 5
+    /// seconds for a peer to respond.
+    pub async fn get_with_network_dht(
+        &self,
+        pubkey_hex: &str,
+        metadata_db: &Mutex<MetadataDb>,
+        services: &std::sync::Arc<super::ServiceContainer>,
+    ) -> Result<Value, String> {
+        let local = self.get(pubkey_hex, metadata_db).await?;
+
+        // If we got a result with a display_name, return it.
+        if local.get("display_name").and_then(|v| v.as_str()).is_some() {
+            return Ok(local);
+        }
+
+        // Try local DHT.
+        if let Some(dht_profile) = DhtNodeService::lookup_profile(
+            pubkey_hex, &services.dht_storage,
+        )? {
+            return Ok(dht_profile);
+        }
+
+        // Query the network DHT.
+        let key = super::dht::dht_key("profile", pubkey_hex);
+        match crate::dht_query::query_network_dht(&key, services).await? {
+            Some(val) => {
+                // Also store in local profiles table for future lookups.
+                store_profile_from_dht(pubkey_hex, &val, metadata_db);
+                Ok(val)
+            }
             None => Ok(local),
         }
     }

@@ -170,6 +170,34 @@ impl HandleService {
         }
     }
 
+    /// Look up a handle by name, querying the network DHT if not found
+    /// locally. This is the async version of `lookup_with_dht` that performs
+    /// a gossip-based DHT query to remote peers.
+    pub async fn lookup_with_network_dht(
+        name: &str,
+        registry: &Mutex<HandleRegistry>,
+        services: &std::sync::Arc<crate::services::ServiceContainer>,
+    ) -> Result<Value, String> {
+        // Try local registry first.
+        let result = Self::lookup(name, registry)?;
+        if !result.is_null() {
+            return Ok(result);
+        }
+
+        // Try local DHT.
+        match DhtNodeService::lookup_handle(name, &services.dht_storage)? {
+            Some(val) => return Ok(val),
+            None => {}
+        }
+
+        // Query the network DHT.
+        let key = super::dht::dht_key("handle", name);
+        match crate::dht_query::query_network_dht(&key, services).await? {
+            Some(val) => Ok(val),
+            None => Ok(Value::Null),
+        }
+    }
+
     /// Look up the handle owned by the current identity (reverse lookup).
     pub fn my_handle(
         identity: &IdentityService,

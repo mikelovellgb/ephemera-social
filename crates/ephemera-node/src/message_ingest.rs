@@ -1,19 +1,22 @@
-//! Message ingest: receives dead drop envelopes from the gossip network,
-//! validates them, and stores them in the local dead drop table.
+//! Message ingest: receives messages from the gossip network.
 //!
 //! This module is the DM counterpart to `gossip_ingest.rs` (which handles
-//! public posts). When a dead drop envelope arrives on the `dm_delivery`
-//! gossip topic:
-//! 1. Deserialize the envelope from the payload.
-//! 2. Validate expiry and size constraints.
-//! 3. Check if the mailbox key matches our pubkey (we are the recipient).
-//! 4. Store in the local dead drop table for later retrieval.
-//! 5. If we are the recipient, emit a MessageReceived event.
+//! public posts). When a message arrives on the `dm_delivery` gossip topic:
+//!
+//! 1. Try to parse as a plaintext `direct_message` JSON envelope (simple path).
+//!    If matched and addressed to us, store directly in conversations/messages
+//!    tables so the UI can display it immediately.
+//! 2. Otherwise fall back to the encrypted `DeadDropEnvelope` flow:
+//!    a. Deserialize the envelope from the payload.
+//!    b. Validate expiry and size constraints.
+//!    c. Check if the mailbox key matches our pubkey (we are the recipient).
+//!    d. Store in the local dead drop table for later retrieval.
+//!    e. If we are the recipient, emit a MessageReceived event.
 
 use ephemera_events::{Event, EventBus};
 use ephemera_gossip::TopicSubscription;
 use ephemera_message::dead_drop::DEAD_DROP_MAX_TTL_SECS;
-use ephemera_message::{DeadDropEnvelope, DeadDropService};
+use ephemera_message::{DeadDropEnvelope, DeadDropService, MessageService as MsgServiceImpl};
 use ephemera_store::MetadataDb;
 use ephemera_types::{ContentId, IdentityKey};
 
@@ -70,6 +73,20 @@ pub async fn message_ingest_loop(
                     continue;
                 }
 
+                // ── Plaintext direct_message path ──────────────────────
+                //
+                // Try to parse as a simple JSON direct_message first. This
+                // bypasses the encryption/dead-drop complexity and lets us
+                // verify that gossip delivery works end-to-end.
+                if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&msg.payload) {
+                    if json.get("type").and_then(|t| t.as_str()) == Some("direct_message") {
+                        handle_plaintext_dm(&json, &metadata_db, &event_bus, our_pubkey.as_ref());
+                        continue;
+                    }
+                }
+
+                // ── Encrypted DeadDropEnvelope path (legacy) ─────────
+                //
                 // Deserialize the gossip payload as a DeadDropEnvelope.
                 let envelope: DeadDropEnvelope = match serde_json::from_slice(&msg.payload) {
                     Ok(e) => e,
@@ -279,4 +296,187 @@ pub async fn message_ingest_loop(
             }
         }
     }
+}
+
+/// Handle a plaintext `direct_message` JSON received via gossip.
+///
+/// Expected format:
+/// ```json
+/// {
+///     "type": "direct_message",
+///     "sender": "<pubkey_hex>",
+///     "recipient": "<pubkey_hex>",
+///     "body": "hello!",
+///     "timestamp": 1234567890
+/// }
+/// ```
+///
+/// If the recipient matches our pubkey, we create/get the conversation and
+/// insert a message row so the UI can display it immediately.
+fn handle_plaintext_dm(
+    json: &serde_json::Value,
+    metadata_db: &Mutex<MetadataDb>,
+    event_bus: &EventBus,
+    our_pubkey: Option<&IdentityKey>,
+) {
+    let sender_hex = match json.get("sender").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => {
+            tracing::warn!("message ingest: direct_message missing 'sender' field");
+            return;
+        }
+    };
+    let recipient_hex = match json.get("recipient").and_then(|v| v.as_str()) {
+        Some(r) => r,
+        None => {
+            tracing::warn!("message ingest: direct_message missing 'recipient' field");
+            return;
+        }
+    };
+    let body = match json.get("body").and_then(|v| v.as_str()) {
+        Some(b) => b,
+        None => {
+            tracing::warn!("message ingest: direct_message missing 'body' field");
+            return;
+        }
+    };
+    let timestamp = json
+        .get("timestamp")
+        .and_then(|v| v.as_u64())
+        .unwrap_or_else(now_secs);
+
+    tracing::info!(
+        sender = %sender_hex,
+        recipient = %recipient_hex,
+        body_len = body.len(),
+        "message ingest: received plaintext direct_message via gossip"
+    );
+
+    // Check if we are the recipient.
+    let our_pk = match our_pubkey {
+        Some(pk) => pk,
+        None => {
+            tracing::debug!("message ingest: no local identity, skipping direct_message");
+            return;
+        }
+    };
+
+    let our_hex = hex::encode(our_pk.as_bytes());
+    if recipient_hex != our_hex {
+        tracing::debug!(
+            recipient = %recipient_hex,
+            ours = %our_hex,
+            "message ingest: direct_message not for us, ignoring"
+        );
+        return;
+    }
+
+    // Parse sender pubkey bytes.
+    let sender_bytes = match hex::decode(sender_hex) {
+        Ok(b) if b.len() == 32 => b,
+        _ => {
+            tracing::warn!(
+                sender = %sender_hex,
+                "message ingest: invalid sender pubkey in direct_message"
+            );
+            return;
+        }
+    };
+
+    let local_bytes = our_pk.as_bytes().to_vec();
+
+    // Compute a message ID from sender + body + timestamp to deduplicate.
+    let msg_id = blake3::hash(
+        format!("{}:{}:{}", sender_hex, body, timestamp).as_bytes(),
+    )
+    .as_bytes()
+    .to_vec();
+
+    let db = match metadata_db.lock() {
+        Ok(d) => d,
+        Err(_) => {
+            tracing::warn!("message ingest: failed to lock metadata db for direct_message");
+            return;
+        }
+    };
+
+    // Get or create the conversation between us and the sender.
+    let conversation_id =
+        match MsgServiceImpl::get_or_create_conversation(&db, &local_bytes, &sender_bytes, false) {
+            Ok(id) => id,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "message ingest: failed to get/create conversation for direct_message"
+                );
+                return;
+            }
+        };
+
+    let now = now_secs() as i64;
+    let expires_at = now + 86400; // 24h default TTL
+    let preview: String = body.chars().take(100).collect();
+
+    // Insert the message. Use INSERT OR IGNORE to handle duplicates from
+    // gossip re-delivery.
+    match db.conn().execute(
+        "INSERT OR IGNORE INTO messages
+         (message_id, conversation_id, sender_pubkey, received_at,
+          expires_at, is_read, body_preview, has_media, is_encrypted)
+         VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, 0, 0)",
+        rusqlite::params![
+            msg_id,
+            conversation_id,
+            sender_bytes,
+            timestamp as i64,
+            expires_at,
+            preview,
+        ],
+    ) {
+        Ok(rows) if rows > 0 => {
+            tracing::info!(
+                sender = %sender_hex,
+                body_preview = %preview,
+                "message ingest: stored plaintext direct_message"
+            );
+
+            // Update conversation last_message_at and increment unread count.
+            let _ = db.conn().execute(
+                "UPDATE conversations SET last_message_at = ?1,
+                 unread_count = unread_count + 1 WHERE conversation_id = ?2",
+                rusqlite::params![timestamp as i64, conversation_id],
+            );
+        }
+        Ok(_) => {
+            tracing::debug!(
+                sender = %sender_hex,
+                "message ingest: direct_message already stored (duplicate)"
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "message ingest: failed to insert direct_message"
+            );
+        }
+    }
+
+    // Drop DB lock before emitting event.
+    drop(db);
+
+    // Emit MessageReceived so the frontend can refresh.
+    let mut sender_arr = [0u8; 32];
+    sender_arr.copy_from_slice(&sender_bytes);
+    let sender_key = IdentityKey::from_bytes(sender_arr);
+    let msg_id_hex = hex::encode(&msg_id);
+
+    tracing::info!(
+        message_id = %msg_id_hex,
+        from = %sender_hex,
+        "message ingest: emitting MessageReceived event for direct_message"
+    );
+    event_bus.emit(Event::MessageReceived {
+        from: sender_key,
+        message_id: msg_id_hex,
+    });
 }

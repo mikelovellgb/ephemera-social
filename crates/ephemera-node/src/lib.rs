@@ -9,6 +9,7 @@ pub mod api;
 pub mod background;
 pub mod background_dht;
 pub mod debug_log;
+pub mod dht_query;
 pub mod gossip_ingest;
 pub mod message_ingest;
 pub mod network;
@@ -414,6 +415,38 @@ impl EphemeraNode {
             });
             ingest_handles.push(h);
             tracing::info!("spawned moderation ingest loop (tombstones)");
+        }
+
+        // 2d. Spawn DHT query ingest loop (dht_lookup gossip topic)
+        {
+            let dht_topic = ephemera_gossip::GossipTopic::dht_lookup();
+            let dht_subscription =
+                network
+                    .subscribe(&dht_topic)
+                    .await
+                    .map_err(|e| StartupError::Transport {
+                        reason: format!("failed to subscribe to dht_lookup: {e}"),
+                    })?;
+
+            let services_for_dht = std::sync::Arc::clone(&self.services);
+            let network_for_dht = std::sync::Arc::clone(&network);
+            let pending_queries = std::sync::Arc::clone(&self.services.pending_dht_queries);
+            let our_node_id = hex::encode(network.local_id().as_bytes());
+            let dht_shutdown_rx = self.shutdown.subscribe();
+
+            let h = tokio::spawn(async move {
+                dht_query::dht_query_ingest_loop_services(
+                    dht_subscription,
+                    services_for_dht,
+                    network_for_dht,
+                    pending_queries,
+                    our_node_id,
+                    dht_shutdown_rx,
+                )
+                .await;
+            });
+            ingest_handles.push(h);
+            tracing::info!("spawned DHT query ingest loop (dht_lookup)");
         }
 
         // Store ingest handles so upgrade_network_to_iroh() can abort them.

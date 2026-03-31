@@ -85,6 +85,16 @@ impl GossipTopic {
     pub fn direct_messages() -> Self {
         Self(*blake3::hash(b"ephemera-topic-dm-delivery-v1").as_bytes())
     }
+
+    /// DHT lookup topic for network-wide DHT queries and responses.
+    ///
+    /// When a local DHT lookup misses, a query is published on this topic.
+    /// Peers that hold the requested key respond on the same topic with the
+    /// value. This turns the local-only DHT into a network-queryable store.
+    #[must_use]
+    pub fn dht_lookup() -> Self {
+        Self(*blake3::hash(b"ephemera-topic-dht-lookup-v1").as_bytes())
+    }
 }
 
 impl fmt::Debug for GossipTopic {
@@ -181,6 +191,7 @@ mod tests {
             GossipTopic::bloom_updates(),
             GossipTopic::reactions(),
             GossipTopic::direct_messages(),
+            GossipTopic::dht_lookup(),
         ];
         for (i, a) in topics.iter().enumerate() {
             for (j, b) in topics.iter().enumerate() {

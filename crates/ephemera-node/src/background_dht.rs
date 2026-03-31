@@ -88,29 +88,38 @@ fn republish_own_records(services: &ServiceContainer) {
         }
     }
 
-    // Re-publish profile from local DB.
+    // Re-publish profile from local DB (including avatar_cid).
     {
         let db = match services.metadata_db.lock() {
             Ok(d) => d,
             Err(_) => return,
         };
         let pubkey_bytes = signing_kp.public_key().as_bytes().to_vec();
-        let profile: Option<(Option<String>, Option<String>)> = db
+        let profile: Option<(Option<String>, Option<String>, Option<Vec<u8>>)> = db
             .conn()
             .query_row(
-                "SELECT display_name, bio FROM profiles WHERE pubkey = ?1",
+                "SELECT display_name, bio, avatar_cid FROM profiles WHERE pubkey = ?1",
                 rusqlite::params![pubkey_bytes],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .ok();
         drop(db);
 
-        if let Some((name, bio)) = profile {
-            let profile_json = serde_json::json!({
+        if let Some((name, bio, avatar_cid)) = profile {
+            let mut profile_json = serde_json::json!({
                 "pubkey": pubkey_hex,
                 "display_name": name,
                 "bio": bio,
             });
+            // Include avatar_cid so remote nodes know the avatar hash.
+            if let Some(ref cid) = avatar_cid {
+                if let Some(obj) = profile_json.as_object_mut() {
+                    obj.insert(
+                        "avatar_cid".to_string(),
+                        serde_json::Value::String(hex::encode(cid)),
+                    );
+                }
+            }
             if let Err(e) = DhtNodeService::store_profile(
                 &pubkey_hex,
                 &profile_json,

@@ -162,6 +162,17 @@ async fn boot_node(
     let mut node = EphemeraNode::with_debug_log(config, debug_log.clone())?;
     node.start().await?;
 
+    // Spawn a 30-second heartbeat task to monitor network connectivity.
+    // On mobile, this detects when the app resumes from background and
+    // the network connection has dropped.
+    if let Some(net) = node.network() {
+        let net = Arc::clone(net);
+        tokio::spawn(async move {
+            connectivity_heartbeat(net).await;
+        });
+        tracing::info!("spawned connectivity heartbeat task (30s interval)");
+    }
+
     let router = build_router_with_network(
         Arc::clone(node.services()),
         Some(debug_log),
@@ -171,6 +182,41 @@ async fn boot_node(
         router,
         node: Mutex::new(node),
     })
+}
+
+/// Background task that checks network connectivity every 30 seconds.
+///
+/// Logs the current peer count and transport status. On mobile platforms
+/// (Android/iOS) the OS may suspend the process or kill network sockets
+/// when the app goes to background. This heartbeat detects when
+/// connectivity drops so we can log the state for debugging.
+///
+/// The Iroh transport handles reconnection to relay servers internally,
+/// but this heartbeat gives us visibility into the connectivity state.
+async fn connectivity_heartbeat(network: Arc<ephemera_node::network::NetworkSubsystem>) {
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+    // Don't pile up missed ticks if we're suspended/delayed.
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    loop {
+        interval.tick().await;
+
+        let peer_count = network.peer_count();
+        let transport = network.transport_kind();
+
+        if peer_count == 0 {
+            tracing::warn!(
+                transport = ?transport,
+                "heartbeat: no connected peers -- gossip messages will not be delivered"
+            );
+        } else {
+            tracing::info!(
+                peer_count = peer_count,
+                transport = ?transport,
+                "heartbeat: network OK"
+            );
+        }
+    }
 }
 
 // -----------------------------------------------------------------------

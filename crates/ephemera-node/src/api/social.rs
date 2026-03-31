@@ -347,7 +347,7 @@ pub fn register_profiles(router: &mut Router, services: &Arc<ServiceContainer>) 
         async move {
             let pubkey = extract_str(&params, "pubkey")?;
             svc.profiles
-                .get_with_dht(&pubkey, &svc.metadata_db, &svc.dht_storage)
+                .get_with_network_dht(&pubkey, &svc.metadata_db, &svc)
                 .await
                 .map_err(internal_error)
         }

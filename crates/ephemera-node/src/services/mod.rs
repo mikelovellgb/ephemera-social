@@ -22,6 +22,7 @@ pub use notifications::NotificationService;
 pub use post::PostService;
 pub use social::{MessageService, ModerationService, ProfileService, SocialService};
 
+use crate::dht_query::PendingDhtQueries;
 use crate::startup::StartupError;
 use ephemera_abuse::{FingerprintStore, RateLimiter, ReputationScore};
 use ephemera_config::NodeConfig;
@@ -100,6 +101,9 @@ pub struct ServiceContainer {
     /// moderation). Stored so they can be aborted when the network is
     /// upgraded from TCP to Iroh and new loops must be spawned.
     ingest_handles: Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    /// Pending DHT network queries: maps query_id -> oneshot sender.
+    /// Used by `dht_query.rs` to correlate responses with requests.
+    pub pending_dht_queries: PendingDhtQueries,
 }
 
 impl ServiceContainer {
@@ -202,6 +206,7 @@ impl ServiceContainer {
             metadata_db_path,
             shutdown_tx: Mutex::new(None),
             ingest_handles: Mutex::new(Vec::new()),
+            pending_dht_queries: crate::dht_query::new_pending_queries(),
         })
     }
 
@@ -245,7 +250,7 @@ impl ServiceContainer {
     /// Returns `Ok(true)` if the network was upgraded, `Ok(false)` if
     /// already using Iroh or no upgrade was needed.
     #[cfg(feature = "iroh-transport")]
-    pub async fn upgrade_network_to_iroh(&self) -> Result<bool, String> {
+    pub async fn upgrade_network_to_iroh(self: &std::sync::Arc<Self>) -> Result<bool, String> {
         use crate::network::{NetworkSubsystem, TransportKind};
 
         // Check if already using Iroh.
@@ -304,6 +309,12 @@ impl ServiceContainer {
             .await
             .map_err(|e| format!("subscribe moderation on new network: {e}"))?;
 
+        let dht_topic = ephemera_gossip::GossipTopic::dht_lookup();
+        let dht_sub = new_net
+            .subscribe(&dht_topic)
+            .await
+            .map_err(|e| format!("subscribe dht_lookup on new network: {e}"))?;
+
         // --- Get shutdown receivers ---
         let shutdown_tx = self
             .shutdown_tx
@@ -313,7 +324,7 @@ impl ServiceContainer {
             .ok_or("shutdown_tx not set — node not started")?;
 
         // --- Spawn fresh ingest loops ---
-        let mut new_handles = Vec::with_capacity(3);
+        let mut new_handles = Vec::with_capacity(4);
 
         // 1. Public feed ingest
         {
@@ -392,6 +403,29 @@ impl ServiceContainer {
             });
             new_handles.push(h);
             tracing::info!("re-spawned moderation ingest loop on new Iroh network");
+        }
+
+        // 4. DHT query ingest
+        {
+            let services_for_dht = std::sync::Arc::clone(self);
+            let network_for_dht = std::sync::Arc::clone(&new_net);
+            let pending_queries = std::sync::Arc::clone(&self.pending_dht_queries);
+            let our_node_id = hex::encode(new_net.local_id().as_bytes());
+            let dht_shutdown_rx = shutdown_tx.subscribe();
+
+            let h = tokio::spawn(async move {
+                crate::dht_query::dht_query_ingest_loop_services(
+                    dht_sub,
+                    services_for_dht,
+                    network_for_dht,
+                    pending_queries,
+                    our_node_id,
+                    dht_shutdown_rx,
+                )
+                .await;
+            });
+            new_handles.push(h);
+            tracing::info!("re-spawned DHT query ingest loop on new Iroh network");
         }
 
         tracing::info!("Iroh upgrade: gossip re-subscribed, ingest loops re-spawned");
