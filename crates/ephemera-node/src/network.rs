@@ -154,6 +154,17 @@ impl NetworkSubsystem {
         self.relay_state
     }
 
+    /// Access the underlying Iroh endpoint for re-announcement.
+    ///
+    /// Returns `None` if the transport is not an Iroh transport (shouldn't
+    /// happen in production, but the type system allows it).
+    pub fn iroh_endpoint(&self) -> Option<&ephemera_transport::iroh_transport::Endpoint> {
+        self.transport
+            .as_any()
+            .downcast_ref::<ephemera_transport::IrohTransport>()
+            .map(|iroh| iroh.endpoint())
+    }
+
     /// Disconnect from a specific peer by node ID.
     pub async fn disconnect_peer(
         &self,

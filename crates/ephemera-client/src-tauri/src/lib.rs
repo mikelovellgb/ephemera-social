@@ -274,19 +274,18 @@ async fn start_test_http_server(router: Router) {
     }
 }
 
-/// Background task that checks network connectivity every 30 seconds.
+/// Background task that monitors network connectivity and triggers
+/// re-announcement when the app resumes from background.
 ///
-/// Logs the current peer count and transport status. On mobile platforms
-/// (Android/iOS) the OS may suspend the process or kill network sockets
-/// when the app goes to background. This heartbeat detects when
-/// connectivity drops so we can log the state for debugging.
-///
-/// The Iroh transport handles reconnection to relay servers internally,
-/// but this heartbeat gives us visibility into the connectivity state.
+/// On mobile (Android/iOS) the OS kills network sockets when the app
+/// goes to background. When we detect zero peers, we call
+/// `endpoint.online()` to force Iroh to re-publish its Pkarr DNS
+/// record, making us discoverable again.
 async fn connectivity_heartbeat(network: Arc<ephemera_node::network::NetworkSubsystem>) {
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
-    // Don't pile up missed ticks if we're suspended/delayed.
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    let mut was_disconnected = false;
 
     loop {
         interval.tick().await;
@@ -295,13 +294,41 @@ async fn connectivity_heartbeat(network: Arc<ephemera_node::network::NetworkSubs
 
         if peer_count == 0 {
             tracing::warn!(
-                "heartbeat: no connected peers -- gossip messages will not be delivered"
+                "heartbeat: no connected peers -- attempting re-announce"
             );
+
+            // Force Iroh to re-check relay connectivity and re-publish
+            // the Pkarr DNS record. This is critical after mobile resume.
+            if let Some(endpoint) = network.iroh_endpoint() {
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(15),
+                    endpoint.online(),
+                )
+                .await
+                {
+                    Ok(()) => {
+                        tracing::info!("heartbeat: relay re-connected after re-announce");
+                    }
+                    Err(_) => {
+                        tracing::warn!("heartbeat: relay re-announce timed out (15s)");
+                    }
+                }
+            }
+
+            was_disconnected = true;
         } else {
-            tracing::info!(
-                peer_count = peer_count,
-                "heartbeat: network OK (Iroh QUIC)"
-            );
+            if was_disconnected {
+                tracing::info!(
+                    peer_count = peer_count,
+                    "heartbeat: connectivity restored"
+                );
+                was_disconnected = false;
+            } else {
+                tracing::info!(
+                    peer_count = peer_count,
+                    "heartbeat: network OK (Iroh QUIC)"
+                );
+            }
         }
     }
 }

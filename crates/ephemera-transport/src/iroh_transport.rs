@@ -26,7 +26,11 @@ use crate::{PeerAddr, Transport};
 use ephemera_types::NodeId;
 
 use iroh::endpoint::presets;
-use iroh::{EndpointAddr, Endpoint, TransportAddr};
+use iroh::{EndpointAddr, TransportAddr};
+
+/// Re-export Iroh's Endpoint type for use by consumers that need
+/// direct access (e.g., for re-announcing after mobile resume).
+pub use iroh::Endpoint;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -648,6 +652,10 @@ impl Transport for IrohTransport {
             Ok(guard) => guard.contains_key(peer),
             Err(_) => false,
         }
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 }
 

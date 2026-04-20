@@ -46,6 +46,9 @@ impl ephemera_transport::Transport for MockTransport {
     fn is_connected(&self, peer: &NodeId) -> bool {
         self.peers.lock().unwrap().contains(peer)
     }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 #[tokio::test]

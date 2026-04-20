@@ -18,23 +18,24 @@ pub const MAX_HANDLE_LEN: usize = 20;
 
 /// PoW difficulty for short handles (3-5 characters).
 ///
-/// ~5 minutes of computation on modern hardware. 2^28 expected iterations.
-pub const POW_DIFFICULTY_HIGH: u32 = 28;
+/// With Argon2id (~200ms per attempt), 2^11 expected attempts ≈ **7 minutes**.
+/// Premium short handles should be expensive to claim.
+pub const POW_DIFFICULTY_HIGH: u32 = 11;
 
 /// PoW difficulty for medium handles (6-10 characters).
 ///
-/// ~30 seconds of computation. 2^24 expected iterations.
-pub const POW_DIFFICULTY_MEDIUM: u32 = 24;
+/// With Argon2id (~200ms per attempt), 2^9 expected attempts ≈ **100 seconds**.
+pub const POW_DIFFICULTY_MEDIUM: u32 = 9;
 
 /// PoW difficulty for long handles (11-20 characters).
 ///
-/// ~5 seconds of computation. 2^20 expected iterations.
-pub const POW_DIFFICULTY_LOW: u32 = 20;
+/// With Argon2id (~200ms per attempt), 2^7 expected attempts ≈ **25 seconds**.
+pub const POW_DIFFICULTY_LOW: u32 = 7;
 
 /// PoW difficulty for handle renewals (lower than initial registration).
 ///
-/// ~1 second of computation. 2^18 expected iterations.
-pub const POW_DIFFICULTY_RENEWAL: u32 = 18;
+/// With Argon2id (~200ms per attempt), 2^5 expected attempts ≈ **6 seconds**.
+pub const POW_DIFFICULTY_RENEWAL: u32 = 5;
 
 /// Handle TTL in seconds (90 days).
 pub const HANDLE_TTL_SECS: u64 = 90 * 24 * 60 * 60;

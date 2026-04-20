@@ -57,4 +57,7 @@ pub trait Transport: Send + Sync + 'static {
 
     /// Check if we are connected to a specific peer.
     fn is_connected(&self, peer: &NodeId) -> bool;
+
+    /// Downcast to concrete type for transport-specific operations.
+    fn as_any(&self) -> &dyn std::any::Any;
 }
