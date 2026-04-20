@@ -131,44 +131,69 @@ async fn serve_media(
     };
 
     // Look up the media attachment metadata.
-    let attachment = match ephemera_store::get_media_attachment(&db, &media_id) {
-        Ok(a) => a,
-        Err(_) => {
-            return Response::builder()
-                .status(StatusCode::NOT_FOUND)
-                .body(Body::from("media not found"))
-                .expect("error response");
-        }
-    };
+    match ephemera_store::get_media_attachment(&db, &media_id) {
+        Ok(attachment) => {
+            // Retrieve and reassemble all chunks in order.
+            let chunks = match ephemera_store::list_chunks_for_media(&db, &media_id) {
+                Ok(c) => c,
+                Err(_) => {
+                    return Response::builder()
+                        .status(StatusCode::INTERNAL_SERVER_ERROR)
+                        .body(Body::from("failed to read media chunks"))
+                        .expect("error response");
+                }
+            };
 
-    // Retrieve and reassemble all chunks in order.
-    let chunks = match ephemera_store::list_chunks_for_media(&db, &media_id) {
-        Ok(c) => c,
-        Err(_) => {
-            return Response::builder()
-                .status(StatusCode::INTERNAL_SERVER_ERROR)
-                .body(Body::from("failed to read media chunks"))
-                .expect("error response");
-        }
-    };
+            let mut data = Vec::new();
+            for chunk in &chunks {
+                data.extend_from_slice(&chunk.data);
+            }
 
-    let mut data = Vec::new();
-    for chunk in &chunks {
-        data.extend_from_slice(&chunk.data);
-    }
-
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, &attachment.mime_type)
-        .header(header::CACHE_CONTROL, "public, max-age=3600")
-        .header(header::CONTENT_LENGTH, data.len().to_string())
-        .body(Body::from(data))
-        .unwrap_or_else(|_| {
             Response::builder()
-                .status(StatusCode::INTERNAL_SERVER_ERROR)
-                .body(Body::from("internal error"))
-                .expect("error response")
-        })
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, &attachment.mime_type)
+                .header(header::CACHE_CONTROL, "public, max-age=3600")
+                .header(header::CONTENT_LENGTH, data.len().to_string())
+                .body(Body::from(data))
+                .unwrap_or_else(|_| {
+                    Response::builder()
+                        .status(StatusCode::INTERNAL_SERVER_ERROR)
+                        .body(Body::from("internal error"))
+                        .expect("error response")
+                })
+        }
+        Err(_) => {
+            // Fallback: try to serve from the content store (used for avatars
+            // and other blobs stored by content hash rather than as chunked
+            // media attachments).
+            drop(db); // Release DB lock before content store access.
+            let content_store = services.content_store();
+            match content_store.get(&media_id) {
+                Ok(data) => {
+                    let mime = mime_guess::from_path(&media_id)
+                        .first_or(mime_guess::mime::IMAGE_PNG);
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .header(header::CONTENT_TYPE, mime.as_ref())
+                        .header(header::CACHE_CONTROL, "public, max-age=3600")
+                        .header(header::CONTENT_LENGTH, data.len().to_string())
+                        .body(Body::from(data))
+                        .unwrap_or_else(|_| {
+                            Response::builder()
+                                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                                .body(Body::from("internal error"))
+                                .expect("error response")
+                        })
+                }
+                Err(_) => {
+                    Response::builder()
+                        .status(StatusCode::NOT_FOUND)
+                        .body(Body::from("media not found"))
+                        .expect("error response")
+                }
+            }
+        }
+    }
 }
 
 /// Serve a media attachment's thumbnail by media_id.

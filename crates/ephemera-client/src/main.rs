@@ -33,17 +33,22 @@ async fn main() {
 
     tracing::info!("Ephemera v{}", env!("CARGO_PKG_VERSION"));
 
-    // Determine data directory
-    let data_dir = NodeConfig::default_data_dir().unwrap_or_else(|| {
-        let fallback = std::env::current_dir()
-            .unwrap_or_else(|_| std::path::PathBuf::from("."))
-            .join(".ephemera");
-        tracing::warn!(
-            path = %fallback.display(),
-            "could not determine platform data directory, using fallback"
-        );
-        fallback
-    });
+    // Determine data directory: prefer EPHEMERA_DATA_DIR env var, then
+    // platform default, then fallback to .ephemera in cwd.
+    let data_dir = std::env::var("EPHEMERA_DATA_DIR")
+        .ok()
+        .map(std::path::PathBuf::from)
+        .or_else(NodeConfig::default_data_dir)
+        .unwrap_or_else(|| {
+            let fallback = std::env::current_dir()
+                .unwrap_or_else(|_| std::path::PathBuf::from("."))
+                .join(".ephemera");
+            tracing::warn!(
+                path = %fallback.display(),
+                "could not determine platform data directory, using fallback"
+            );
+            fallback
+        });
 
     tracing::info!(data_dir = %data_dir.display(), "using data directory");
 
@@ -73,10 +78,12 @@ async fn main() {
     println!("  ╚══════════════════════════════════════╝");
     println!();
 
-    // Open the browser
-    if let Err(e) = open::that(&url) {
-        tracing::warn!(error = %e, "could not open browser automatically");
-        println!("Could not open browser. Please navigate to: {url}");
+    // Open the browser (skip in headless/Docker environments)
+    if std::env::var("EPHEMERA_NO_BROWSER").is_err() {
+        if let Err(e) = open::that(&url) {
+            tracing::warn!(error = %e, "could not open browser automatically");
+            println!("Could not open browser. Please navigate to: {url}");
+        }
     }
 
     // Start the HTTP server (blocks until shutdown)
@@ -89,9 +96,17 @@ async fn main() {
 
 /// Try to find an available port starting from `preferred`.
 /// Falls back to letting the OS assign one if the preferred range is taken.
+///
+/// Respects `EPHEMERA_HTTP_ADDR` env var to override the bind IP address
+/// (default `127.0.0.1`). Set to `0.0.0.0` for Docker containers.
 async fn find_available_port(preferred: u16) -> SocketAddr {
+    let bind_ip: std::net::IpAddr = std::env::var("EPHEMERA_HTTP_ADDR")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+
     for port in preferred..preferred + 100 {
-        let addr = SocketAddr::from(([127, 0, 0, 1], port));
+        let addr = SocketAddr::new(bind_ip, port);
         if tokio::net::TcpListener::bind(addr).await.is_ok() {
             return addr;
         }
@@ -102,7 +117,7 @@ async fn find_available_port(preferred: u16) -> SocketAddr {
         "could not bind to ports {preferred}-{}, letting OS choose",
         preferred + 99
     );
-    let addr = SocketAddr::from(([127, 0, 0, 1], 0));
+    let addr = SocketAddr::new(bind_ip, 0);
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .expect("failed to bind to any port");

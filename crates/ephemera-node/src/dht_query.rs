@@ -38,7 +38,7 @@ pub struct DhtResponseMessage {
     pub query_id: String,
 }
 
-const DHT_QUERY_TIMEOUT: Duration = Duration::from_secs(5);
+const DHT_QUERY_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Pending DHT queries: maps query_id -> oneshot sender.
 pub type PendingDhtQueries = Arc<Mutex<HashMap<String, oneshot::Sender<Value>>>>;
@@ -170,9 +170,31 @@ pub async fn query_network_dht(
     key: &[u8; 32],
     services: &Arc<ServiceContainer>,
 ) -> Result<Option<Value>, String> {
-    // 1. Check local DHT.
-    if let Ok(Some(val)) = DhtNodeService::get(key, &services.dht_storage) {
-        return Ok(Some(val));
+    query_network_dht_inner(key, services, false).await
+}
+
+/// Query the network DHT, optionally skipping the local cache.
+///
+/// When `skip_local` is true, the local DHT is not checked first — useful
+/// when the caller wants the freshest data from the network (e.g. profile
+/// lookups where the owner may have updated their profile).
+pub async fn query_network_dht_fresh(
+    key: &[u8; 32],
+    services: &Arc<ServiceContainer>,
+) -> Result<Option<Value>, String> {
+    query_network_dht_inner(key, services, true).await
+}
+
+async fn query_network_dht_inner(
+    key: &[u8; 32],
+    services: &Arc<ServiceContainer>,
+    skip_local: bool,
+) -> Result<Option<Value>, String> {
+    // 1. Check local DHT (unless caller wants fresh network data).
+    if !skip_local {
+        if let Ok(Some(val)) = DhtNodeService::get(key, &services.dht_storage) {
+            return Ok(Some(val));
+        }
     }
 
     // 2. Get network; bail if unavailable or no peers.

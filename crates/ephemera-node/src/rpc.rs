@@ -132,6 +132,8 @@ type HandlerFn = Arc<
 /// JSON-RPC method router.
 ///
 /// Maps method names like `"identity.create"` to async handler functions.
+/// Cloneable because handlers are behind `Arc`.
+#[derive(Clone)]
 pub struct Router {
     handlers: HashMap<String, HandlerFn>,
 }

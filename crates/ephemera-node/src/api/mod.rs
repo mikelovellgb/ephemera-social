@@ -101,26 +101,9 @@ fn register_identity(router: &mut Router, services: &Arc<ServiceContainer>) {
                 .await
                 .map_err(internal_error)?;
 
-            // After creating identity, try to upgrade network from TCP to Iroh
-            // so the node is discoverable via Iroh relay.
-            #[cfg(feature = "iroh-transport")]
-            {
-                match svc.upgrade_network_to_iroh().await {
-                    Ok(true) => {
-                        let node_id = svc.network.lock().ok()
-                            .and_then(|g| g.as_ref().map(|n| n.local_id().to_string()))
-                            .unwrap_or_default();
-                        tracing::info!(
-                            "Network upgraded to Iroh. Your Node ID: {}. Other devices can find you by this ID.",
-                            node_id
-                        );
-                    }
-                    Ok(false) => {}
-                    Err(e) => tracing::warn!(
-                        "Iroh upgrade failed: {}. Using TCP fallback. Other devices cannot discover you automatically.",
-                        e
-                    ),
-                }
+            // Start the Iroh network now that we have an identity.
+            if let Err(e) = svc.start_network().await {
+                tracing::warn!(error = %e, "failed to start network after identity create");
             }
 
             Ok(result)
@@ -132,31 +115,15 @@ fn register_identity(router: &mut Router, services: &Arc<ServiceContainer>) {
         let svc = Arc::clone(&svc);
         async move {
             let passphrase = extract_str(&params, "passphrase")?;
+            let remember = params.get("remember").and_then(|v| v.as_bool()).unwrap_or(false);
             let result = svc.identity
-                .unlock(&passphrase)
+                .unlock(&passphrase, remember)
                 .await
                 .map_err(internal_error)?;
 
-            // After unlocking identity, try to upgrade network from TCP to Iroh
-            // so the node is discoverable via Iroh relay / NAT traversal.
-            #[cfg(feature = "iroh-transport")]
-            {
-                match svc.upgrade_network_to_iroh().await {
-                    Ok(true) => {
-                        let node_id = svc.network.lock().ok()
-                            .and_then(|g| g.as_ref().map(|n| n.local_id().to_string()))
-                            .unwrap_or_default();
-                        tracing::info!(
-                            "Network upgraded to Iroh. Your Node ID: {}. Other devices can find you by this ID.",
-                            node_id
-                        );
-                    }
-                    Ok(false) => {}
-                    Err(e) => tracing::warn!(
-                        "Iroh upgrade failed: {}. Using TCP fallback. Other devices cannot discover you automatically.",
-                        e
-                    ),
-                }
+            // Start the Iroh network now that identity is unlocked.
+            if let Err(e) = svc.start_network().await {
+                tracing::warn!(error = %e, "failed to start network after unlock");
             }
 
             // Publish the local profile to DHT on unlock so connected peers
@@ -208,9 +175,42 @@ fn register_identity(router: &mut Router, services: &Arc<ServiceContainer>) {
     });
 
     let svc = Arc::clone(services);
-    router.register("identity.lock", move |_params| {
+    router.register("identity.lock", move |params| {
         let svc = Arc::clone(&svc);
-        async move { svc.identity.lock().await.map_err(internal_error) }
+        async move {
+            let forget = params.get("forget").and_then(|v| v.as_bool()).unwrap_or(false);
+            svc.identity.lock(forget).await.map_err(internal_error)
+        }
+    });
+
+    // Auto-unlock using cached session key (for "remember me" feature).
+    let svc = Arc::clone(services);
+    router.register("identity.auto_unlock", move |_params| {
+        let svc = Arc::clone(&svc);
+        async move {
+            let result = svc.identity
+                .auto_unlock()
+                .await
+                .map_err(internal_error)?;
+
+            // If auto-unlock succeeded, start the network.
+            if result.get("auto_unlocked").and_then(|v| v.as_bool()) == Some(true) {
+                if let Err(e) = svc.start_network().await {
+                    tracing::warn!(error = %e, "failed to start network after auto-unlock");
+                }
+            }
+
+            Ok(result)
+        }
+    });
+
+    // Check if a cached session key exists.
+    let svc = Arc::clone(services);
+    router.register("identity.has_session", move |_params| {
+        let svc = Arc::clone(&svc);
+        async move {
+            Ok(serde_json::json!({ "has_session": svc.identity.has_session() }))
+        }
     });
 
     let svc = Arc::clone(services);
@@ -373,11 +373,8 @@ fn register_identity(router: &mut Router, services: &Arc<ServiceContainer>) {
             let passphrase = extract_str(&params, "passphrase")?;
             let result = svc.identity.import_mnemonic(&words, &passphrase).await.map_err(internal_error)?;
 
-            #[cfg(feature = "iroh-transport")]
-            {
-                if let Err(e) = svc.upgrade_network_to_iroh().await {
-                    tracing::warn!(error = %e, "failed to upgrade network to Iroh after mnemonic import");
-                }
+            if let Err(e) = svc.start_network().await {
+                tracing::warn!(error = %e, "failed to start network after mnemonic import");
             }
 
             Ok(result)
@@ -395,11 +392,8 @@ fn register_identity(router: &mut Router, services: &Arc<ServiceContainer>) {
                 .await
                 .map_err(internal_error)?;
 
-            #[cfg(feature = "iroh-transport")]
-            {
-                if let Err(e) = svc.upgrade_network_to_iroh().await {
-                    tracing::warn!(error = %e, "failed to upgrade network to Iroh after backup import");
-                }
+            if let Err(e) = svc.start_network().await {
+                tracing::warn!(error = %e, "failed to start network after backup import");
             }
 
             Ok(result)
@@ -418,11 +412,8 @@ fn register_identity(router: &mut Router, services: &Arc<ServiceContainer>) {
                 .await
                 .map_err(internal_error)?;
 
-            #[cfg(feature = "iroh-transport")]
-            {
-                if let Err(e) = svc.upgrade_network_to_iroh().await {
-                    tracing::warn!(error = %e, "failed to upgrade network to Iroh after QR import");
-                }
+            if let Err(e) = svc.start_network().await {
+                tracing::warn!(error = %e, "failed to start network after QR import");
             }
 
             Ok(result)
@@ -495,9 +486,10 @@ fn register_handles(router: &mut Router, services: &Arc<ServiceContainer>) {
         let svc = Arc::clone(&svc);
         async move {
             let name = extract_str(&params, "name")?;
-            HandleService::lookup_with_dht(
-                &name, &svc.handle_registry, &svc.dht_storage,
+            HandleService::lookup_with_network_dht(
+                &name, &svc.handle_registry, &svc,
             )
+            .await
             .map_err(internal_error)
         }
     });
@@ -545,10 +537,11 @@ fn register_handles(router: &mut Router, services: &Arc<ServiceContainer>) {
         let svc = Arc::clone(&svc);
         async move {
             let name = extract_str(&params, "name")?;
-            // Check local registry first, then DHT.
-            let result = HandleService::lookup_with_dht(
-                &name, &svc.handle_registry, &svc.dht_storage,
+            // Check local registry, local DHT, then network DHT.
+            let result = HandleService::lookup_with_network_dht(
+                &name, &svc.handle_registry, &svc,
             )
+            .await
             .map_err(internal_error)?;
 
             if result.is_null() {

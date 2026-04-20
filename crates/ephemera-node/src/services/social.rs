@@ -838,8 +838,18 @@ impl SocialService {
     /// Post to a topic room.
     pub async fn post_to_topic(&self, topic_id: &str, content_hash_hex: &str) -> Result<Value, String> {
         let hash_bytes = hex::decode(content_hash_hex).map_err(|e| format!("bad content hash: {e}"))?;
+        // Posts table stores content_hash in wire format (version byte + hash).
+        // Convert the raw hash to wire format so the JOIN in get_topic_feed matches.
+        let wire_bytes = if hash_bytes.len() == 32 {
+            let cid = ephemera_types::ContentId::from_digest(
+                hash_bytes.as_slice().try_into().expect("32 bytes"),
+            );
+            cid.to_wire_bytes()
+        } else {
+            hash_bytes
+        };
         let now = now_secs() as i64;
-        self.social_services.post_to_topic(topic_id, &hash_bytes, now).map_err(|e| format!("post to topic: {e}"))?;
+        self.social_services.post_to_topic(topic_id, &wire_bytes, now).map_err(|e| format!("post to topic: {e}"))?;
         Ok(serde_json::json!({ "posted": true }))
     }
 
@@ -1039,8 +1049,17 @@ impl SocialService {
             .map_err(|e| format!("get role: {e}"))?
             .ok_or_else(|| "not a member of this group".to_string())?;
         let hash_bytes = hex::decode(content_hash_hex).map_err(|e| format!("bad hash: {e}"))?;
+        // Convert to wire format (version byte + hash) to match posts table storage.
+        let wire_bytes = if hash_bytes.len() == 32 {
+            let cid = ephemera_types::ContentId::from_digest(
+                hash_bytes.as_slice().try_into().expect("32 bytes"),
+            );
+            cid.to_wire_bytes()
+        } else {
+            hash_bytes
+        };
         let now = now_secs() as i64;
-        self.social_services.post_to_group(group_id, &hash_bytes, &my_pubkey, now)
+        self.social_services.post_to_group(group_id, &wire_bytes, &my_pubkey, now)
             .map_err(|e| format!("post to group: {e}"))?;
         Ok(serde_json::json!({ "posted": true }))
     }
@@ -1887,27 +1906,26 @@ impl ProfileService {
     ) -> Result<Value, String> {
         let local = self.get(pubkey_hex, metadata_db).await?;
 
-        // If we got a result with a display_name, return it.
-        if local.get("display_name").and_then(|v| v.as_str()).is_some() {
-            return Ok(local);
-        }
-
-        // Try local DHT.
-        if let Some(dht_profile) = DhtNodeService::lookup_profile(
-            pubkey_hex, &services.dht_storage,
-        )? {
-            return Ok(dht_profile);
-        }
-
-        // Query the network DHT.
+        // Always query the network DHT for the freshest profile.
+        // Local cache and local DHT may hold stale data from a previous
+        // lookup — the authoritative source is the owner's node, which
+        // publishes updates to the network DHT via gossip.
         let key = super::dht::dht_key("profile", pubkey_hex);
-        match crate::dht_query::query_network_dht(&key, services).await? {
+        match crate::dht_query::query_network_dht_fresh(&key, services).await? {
             Some(val) => {
-                // Also store in local profiles table for future lookups.
+                // Update local cache with the latest network data.
                 store_profile_from_dht(pubkey_hex, &val, metadata_db);
                 Ok(val)
             }
-            None => Ok(local),
+            None => {
+                // Network unavailable or timed out — fall back to local DHT.
+                if let Some(dht_profile) = DhtNodeService::lookup_profile(
+                    pubkey_hex, &services.dht_storage,
+                )? {
+                    return Ok(dht_profile);
+                }
+                Ok(local)
+            }
         }
     }
 
