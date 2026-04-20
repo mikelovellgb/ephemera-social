@@ -45,6 +45,21 @@
 
         stepDiv.appendChild(group);
 
+        // "Remember me" checkbox
+        var rememberGroup = Ephemera.el('div', '');
+        rememberGroup.style.cssText = 'display:flex;align-items:center;gap:8px;margin-top:12px;';
+        var rememberCheck = document.createElement('input');
+        rememberCheck.type = 'checkbox';
+        rememberCheck.id = 'remember-me';
+        rememberCheck.checked = true; // default to checked for convenience
+        rememberCheck.style.cssText = 'width:18px;height:18px;accent-color:var(--primary);';
+        var rememberLabel = Ephemera.el('label', '', 'Remember me on this device');
+        rememberLabel.setAttribute('for', 'remember-me');
+        rememberLabel.style.cssText = 'font-size:var(--fs-sm);color:var(--text-secondary);cursor:pointer;';
+        rememberGroup.appendChild(rememberCheck);
+        rememberGroup.appendChild(rememberLabel);
+        stepDiv.appendChild(rememberGroup);
+
         var errorMsg = Ephemera.el('div', '');
         errorMsg.style.cssText = 'font-size:var(--fs-sm);color:var(--error);margin-top:8px;min-height:20px;';
         stepDiv.appendChild(errorMsg);
@@ -64,7 +79,10 @@
             errorMsg.textContent = '';
 
             try {
-                await Ephemera.rpc('identity.unlock', { passphrase: passphrase });
+                await Ephemera.rpc('identity.unlock', {
+                    passphrase: passphrase,
+                    remember: rememberCheck.checked,
+                });
 
                 // Fetch the full identity profile
                 try {

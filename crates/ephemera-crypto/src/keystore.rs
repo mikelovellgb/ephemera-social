@@ -170,6 +170,77 @@ pub fn load_keystore(path: &Path, passphrase: &[u8]) -> Result<KeystoreContents,
     Ok(contents)
 }
 
+/// Load and decrypt keystore contents using a pre-derived 32-byte key.
+///
+/// This bypasses Argon2id key derivation, which is useful when the derived
+/// key has been cached (e.g., in an OS keychain for "remember me"
+/// functionality). The caller is responsible for providing the correct key.
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be read, the key is wrong,
+/// or the data is corrupt.
+pub fn load_keystore_with_key(
+    path: &Path,
+    derived_key: &[u8; 32],
+) -> Result<KeystoreContents, EphemeraError> {
+    let file_contents = std::fs::read(path)?;
+
+    let min_len = 4 + SALT_LEN + encryption::NONCE_LEN + encryption::TAG_LEN;
+    if file_contents.len() < min_len {
+        return Err(EphemeraError::KeystoreError {
+            reason: "keystore file too short".into(),
+        });
+    }
+
+    if file_contents[..4] != KEYSTORE_VERSION {
+        return Err(EphemeraError::KeystoreError {
+            reason: "unsupported keystore version".into(),
+        });
+    }
+
+    let sealed = &file_contents[4 + SALT_LEN..];
+    let plaintext = encryption::open(derived_key, sealed).map_err(|_| {
+        EphemeraError::KeystoreError {
+            reason: "decryption failed (invalid cached key or corrupt keystore)".into(),
+        }
+    })?;
+
+    let contents: KeystoreContents =
+        serde_json::from_slice(&plaintext).map_err(|e| EphemeraError::KeystoreError {
+            reason: format!("keystore deserialization failed: {e}"),
+        })?;
+
+    Ok(contents)
+}
+
+/// Extract the Argon2id salt from a keystore file without decrypting.
+///
+/// Returns `None` if the file doesn't exist or is too short.
+pub fn extract_salt(path: &Path) -> Option<[u8; SALT_LEN]> {
+    let data = std::fs::read(path).ok()?;
+    if data.len() < 4 + SALT_LEN {
+        return None;
+    }
+    let mut salt = [0u8; SALT_LEN];
+    salt.copy_from_slice(&data[4..4 + SALT_LEN]);
+    Some(salt)
+}
+
+/// Derive the 32-byte encryption key from a passphrase and keystore file.
+///
+/// This reads the salt from the keystore header and runs Argon2id. The
+/// returned key can be cached in an OS keychain for future auto-unlock.
+pub fn derive_key_for_keystore(
+    path: &Path,
+    passphrase: &[u8],
+) -> Result<Zeroizing<[u8; 32]>, EphemeraError> {
+    let salt = extract_salt(path).ok_or_else(|| EphemeraError::KeystoreError {
+        reason: "cannot read keystore salt".into(),
+    })?;
+    derive_key_from_passphrase(passphrase, &salt)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

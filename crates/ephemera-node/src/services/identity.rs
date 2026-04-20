@@ -5,8 +5,9 @@
 
 use super::error::{MutexResultExt, NodeServiceError};
 use ephemera_crypto::{
-    derive_pseudonym_key, load_keystore, save_keystore, DeviceManager, KeyExport,
-    KeystoreContents, MasterSecret, Platform, PseudonymEntry, SigningKeyPair,
+    derive_key_for_keystore, derive_pseudonym_key, load_keystore, load_keystore_with_key,
+    save_keystore, DeviceManager, KeyExport, KeystoreContents, MasterSecret, Platform,
+    PseudonymEntry, SigningKeyPair,
 };
 use serde_json::Value;
 use std::path::PathBuf;
@@ -49,9 +50,86 @@ impl IdentityService {
     }
 
     /// Unlock the keystore with the given passphrase and load keys into memory.
-    pub async fn unlock(&self, passphrase: &str) -> Result<Value, String> {
+    ///
+    /// If `remember` is true, the derived encryption key is cached to a
+    /// session file so the app can auto-unlock on next startup without
+    /// re-entering the passphrase.
+    pub async fn unlock(&self, passphrase: &str, remember: bool) -> Result<Value, String> {
         let contents = load_keystore(&self.keystore_path, passphrase.as_bytes())
             .map_err(|e| NodeServiceError::Keystore(format!("unlock failed: {e}")))?;
+
+        if remember {
+            if let Ok(derived) = derive_key_for_keystore(&self.keystore_path, passphrase.as_bytes())
+            {
+                self.save_session_key(&derived);
+            }
+        }
+
+        self.load_contents(contents)
+    }
+
+    /// Try to auto-unlock using a cached session key from a previous
+    /// "remember me" unlock. Returns `Ok` with `auto_unlocked: true` if
+    /// successful, or `Ok` with `auto_unlocked: false` if no session exists.
+    pub async fn auto_unlock(&self) -> Result<Value, String> {
+        let session_path = self.session_key_path();
+        let key_hex = match std::fs::read_to_string(&session_path) {
+            Ok(h) => h.trim().to_string(),
+            Err(_) => return Ok(serde_json::json!({ "auto_unlocked": false })),
+        };
+
+        let key_bytes = hex::decode(&key_hex).map_err(|e| {
+            // Corrupt session file — remove it
+            let _ = std::fs::remove_file(&session_path);
+            NodeServiceError::Keystore(format!("bad session key: {e}"))
+        })?;
+
+        if key_bytes.len() != 32 {
+            let _ = std::fs::remove_file(&session_path);
+            return Err(NodeServiceError::Keystore("session key wrong length".into()).to_string());
+        }
+
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&key_bytes);
+
+        match load_keystore_with_key(&self.keystore_path, &key) {
+            Ok(contents) => {
+                let result = self.load_contents(contents)?;
+                let mut obj = result.as_object().cloned().unwrap_or_default();
+                obj.insert("auto_unlocked".into(), serde_json::json!(true));
+                Ok(Value::Object(obj))
+            }
+            Err(_) => {
+                // Cached key is stale (passphrase changed since caching)
+                let _ = std::fs::remove_file(&session_path);
+                Ok(serde_json::json!({ "auto_unlocked": false, "reason": "session expired" }))
+            }
+        }
+    }
+
+    /// Check whether a cached session key exists (for frontend to decide
+    /// whether to attempt auto-unlock or show the passphrase screen).
+    pub fn has_session(&self) -> bool {
+        self.session_key_path().exists()
+    }
+
+    /// Lock the keystore: wipe keys from memory.
+    ///
+    /// If `forget` is true, also delete the cached session key so the
+    /// user must re-enter their passphrase on next startup.
+    pub async fn lock(&self, forget: bool) -> Result<Value, String> {
+        *self.active_keypair.lock().map_mutex_err("active_keypair")? = None;
+        *self.master_secret.lock().map_mutex_err("master_secret")? = None;
+
+        if forget {
+            let _ = std::fs::remove_file(self.session_key_path());
+        }
+
+        Ok(serde_json::json!({ "locked": true, "session_cleared": forget }))
+    }
+
+    /// Load decrypted keystore contents into memory (shared by unlock and auto_unlock).
+    fn load_contents(&self, contents: KeystoreContents) -> Result<Value, String> {
         let master = MasterSecret::from_bytes(contents.master_secret);
         let pseudonym_count = contents.pseudonym_secrets.len() as u32;
         let active_entry = contents
@@ -66,11 +144,22 @@ impl IdentityService {
         Ok(serde_json::json!({ "unlocked": true, "pseudonym_count": pseudonym_count }))
     }
 
-    /// Lock the keystore: wipe keys from memory.
-    pub async fn lock(&self) -> Result<Value, String> {
-        *self.active_keypair.lock().map_mutex_err("active_keypair")? = None;
-        *self.master_secret.lock().map_mutex_err("master_secret")? = None;
-        Ok(serde_json::json!({ "locked": true }))
+    /// Path to the session key cache file.
+    fn session_key_path(&self) -> PathBuf {
+        self.keystore_path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join("session_key")
+    }
+
+    /// Save the derived key to the session file for auto-unlock.
+    fn save_session_key(&self, key: &[u8; 32]) {
+        let path = self.session_key_path();
+        if let Err(e) = std::fs::write(&path, hex::encode(key)) {
+            tracing::warn!(error = %e, "failed to save session key");
+        } else {
+            tracing::info!("session key cached for auto-unlock");
+        }
     }
 
     /// Check whether a keystore file exists on disk (no unlock required).

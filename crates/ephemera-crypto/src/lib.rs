@@ -39,7 +39,10 @@ pub use keys::{
     derive_epoch_key, derive_pseudonym_key, ed25519_pub_to_x25519, ed25519_seed_to_x25519,
     hkdf_derive, KeyPair, MasterSecret, PublicKeyBytes,
 };
-pub use keystore::{load_keystore, save_keystore, KeystoreContents, PseudonymEntry};
+pub use keystore::{
+    derive_key_for_keystore, load_keystore, load_keystore_with_key, save_keystore,
+    KeystoreContents, PseudonymEntry,
+};
 pub use pow::{generate_pow, verify_pow, PowStamp};
 pub use signing::{verify_signature, SigningKeyPair};
 

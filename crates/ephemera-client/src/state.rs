@@ -50,6 +50,19 @@ impl AppState {
         let mut node = EphemeraNode::with_debug_log(config, debug_log.clone())?;
         node.start().await?;
 
+        // Try auto-unlock from cached session key ("remember me" feature).
+        match node.services().identity.auto_unlock().await {
+            Ok(result) => {
+                if result.get("auto_unlocked").and_then(|v| v.as_bool()) == Some(true) {
+                    tracing::info!("auto-unlocked from cached session key");
+                    if let Err(e) = node.services().start_network().await {
+                        tracing::warn!(error = %e, "failed to start network after auto-unlock");
+                    }
+                }
+            }
+            Err(e) => tracing::debug!(error = %e, "auto-unlock not available"),
+        }
+
         let router = build_router_with_network(
             Arc::clone(node.services()),
             Some(debug_log),

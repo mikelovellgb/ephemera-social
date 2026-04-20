@@ -188,7 +188,7 @@ async fn test_import_qr_rpc() {
     let qr_hex = export_result["qr_hex"].as_str().unwrap().to_string();
 
     // Lock the first identity so the import replaces it.
-    svc.identity.lock().await.unwrap();
+    svc.identity.lock(false).await.unwrap();
 
     // Import the QR on a fresh service container to prove round-trip works.
     let svc2 = test_services();

@@ -162,6 +162,21 @@ async fn boot_node(
     let mut node = EphemeraNode::with_debug_log(config, debug_log.clone())?;
     node.start().await?;
 
+    // Try auto-unlock from cached session key ("remember me" feature).
+    // If a session key exists, this decrypts the keystore and starts the
+    // network without requiring the user to re-enter their passphrase.
+    match node.services().identity.auto_unlock().await {
+        Ok(result) => {
+            if result.get("auto_unlocked").and_then(|v| v.as_bool()) == Some(true) {
+                tracing::info!("auto-unlocked from cached session key");
+                if let Err(e) = node.services().start_network().await {
+                    tracing::warn!(error = %e, "failed to start network after auto-unlock");
+                }
+            }
+        }
+        Err(e) => tracing::debug!(error = %e, "auto-unlock not available"),
+    }
+
     // Spawn a 30-second heartbeat task to monitor network connectivity.
     // On mobile, this detects when the app resumes from background and
     // the network connection has dropped.
@@ -178,10 +193,85 @@ async fn boot_node(
         Some(debug_log),
     );
 
-    Ok(NodeState {
+    let node_state = NodeState {
         router,
         node: Mutex::new(node),
-    })
+    };
+
+    // In debug builds, spawn a lightweight HTTP test server on port 3520
+    // so integration tests can reach the RPC router via `adb forward`.
+    #[cfg(debug_assertions)]
+    {
+        let router_clone = node_state.router.clone();
+        tokio::spawn(async move {
+            start_test_http_server(router_clone).await;
+        });
+    }
+
+    Ok(node_state)
+}
+
+/// Debug-only HTTP server for integration testing via ADB port forwarding.
+///
+/// Listens on `0.0.0.0:3520` and accepts JSON-RPC 2.0 requests via POST.
+/// No authentication — this is only compiled in debug builds.
+#[cfg(debug_assertions)]
+async fn start_test_http_server(router: Router) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let addr = "0.0.0.0:3520";
+    let listener = match TcpListener::bind(addr).await {
+        Ok(l) => {
+            tracing::info!("debug test HTTP server listening on {addr}");
+            l
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to start debug test server on {addr}");
+            return;
+        }
+    };
+
+    loop {
+        let (mut stream, _) = match listener.accept().await {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        let router = router.clone();
+
+        tokio::spawn(async move {
+            let mut buf = vec![0u8; 65536];
+            let n = match stream.read(&mut buf).await {
+                Ok(n) if n > 0 => n,
+                _ => return,
+            };
+            let request_str = String::from_utf8_lossy(&buf[..n]);
+
+            // Find the JSON body after the empty line in HTTP request
+            let body = request_str
+                .find("\r\n\r\n")
+                .map(|i| &request_str[i + 4..])
+                .unwrap_or(&request_str);
+
+            let response_json = if let Ok(req) = serde_json::from_str::<
+                ephemera_node::rpc::JsonRpcRequest,
+            >(body)
+            {
+                let resp = router.dispatch(req).await;
+                serde_json::to_string(&resp).unwrap_or_default()
+            } else {
+                r#"{"jsonrpc":"2.0","error":{"code":-32700,"message":"parse error"},"id":null}"#
+                    .to_string()
+            };
+
+            let http_response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\n\r\n{}",
+                response_json.len(),
+                response_json
+            );
+            let _ = stream.write_all(http_response.as_bytes()).await;
+        });
+    }
 }
 
 /// Background task that checks network connectivity every 30 seconds.
@@ -202,18 +292,15 @@ async fn connectivity_heartbeat(network: Arc<ephemera_node::network::NetworkSubs
         interval.tick().await;
 
         let peer_count = network.peer_count();
-        let transport = network.transport_kind();
 
         if peer_count == 0 {
             tracing::warn!(
-                transport = ?transport,
                 "heartbeat: no connected peers -- gossip messages will not be delivered"
             );
         } else {
             tracing::info!(
                 peer_count = peer_count,
-                transport = ?transport,
-                "heartbeat: network OK"
+                "heartbeat: network OK (Iroh QUIC)"
             );
         }
     }
