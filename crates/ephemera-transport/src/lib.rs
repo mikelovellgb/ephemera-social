@@ -4,37 +4,24 @@
 //! managing multiple peer connections, peer discovery, NAT traversal helpers,
 //! and transport configuration.
 //!
-//! Two concrete transport implementations are available:
-//!
-//! - **TCP** (`TcpTransport`): Simple length-prefixed TCP framing. Always
-//!   available. Useful for local testing and environments where QUIC is not
-//!   feasible.
-//!
-//! - **Iroh** (`IrohTransport`): QUIC-based transport with built-in NAT
-//!   traversal via relay servers and hole-punching. Enabled by the
-//!   `iroh-transport` feature flag (on by default).
+//! Uses [`IrohTransport`] for QUIC-based transport with built-in NAT
+//! traversal via relay servers and hole-punching.
 
 pub mod config;
 pub mod connection;
 pub mod discovery;
 pub mod error;
+pub mod iroh_transport;
 pub mod manager;
 pub mod nat;
 pub mod peer;
-pub mod tcp;
-
-#[cfg(feature = "iroh-transport")]
-pub mod iroh_transport;
 
 pub use config::TransportConfig;
 pub use connection::PeerConnection;
 pub use error::TransportError;
+pub use iroh_transport::{IrohTransport, RelayStatus};
 pub use manager::ConnectionManager;
 pub use peer::PeerRegistry;
-pub use tcp::TcpTransport;
-
-#[cfg(feature = "iroh-transport")]
-pub use iroh_transport::{IrohTransport, RelayStatus};
 
 use async_trait::async_trait;
 use ephemera_types::NodeId;
@@ -50,7 +37,7 @@ pub struct PeerAddr {
 
 /// The core transport trait. All networking goes through this abstraction.
 ///
-/// Implementations may use Iroh QUIC, TCP, or mock transports for testing.
+/// Implementations may use Iroh QUIC or mock transports for testing.
 #[async_trait]
 pub trait Transport: Send + Sync + 'static {
     /// Send raw bytes to a specific peer.

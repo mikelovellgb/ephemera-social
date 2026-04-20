@@ -126,7 +126,7 @@ impl EagerGossipService {
     /// Create a new gossip service and start the background receive loop.
     ///
     /// Accepts any `Arc<T>` where `T: Transport`. This works with
-    /// `Arc<TcpTransport>`, `Arc<IrohTransport>`, or any other transport.
+    /// `Arc<IrohTransport>` or any other transport implementation.
     pub fn new<T: Transport>(local_id: NodeId, transport: Arc<T>) -> Self {
         Self::with_fanout(local_id, transport, FanoutConfig::default())
     }

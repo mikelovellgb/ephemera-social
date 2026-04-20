@@ -1,15 +1,13 @@
 //! JSON-RPC handlers for the `meta.*` namespace.
 //!
-//! Provides node status, capabilities listing, transport tier switching,
+//! Provides node status, capabilities listing, transport tier info,
 //! and the debug log endpoint for the in-app debug console.
 //!
-//! **Important**: All network reads go through `services.network` (the Mutex),
-//! never a captured `Arc<NetworkSubsystem>`. This ensures handlers always see
-//! the *current* network subsystem, even after `upgrade_network_to_iroh()`
-//! replaces the Arc inside the Mutex.
+//! All network reads go through `services.network` (the Mutex) so handlers
+//! always see the current network subsystem.
 
 use crate::debug_log::DebugLogHandle;
-use crate::network::{RelayState, TransportKind};
+use crate::network::RelayState;
 use crate::rpc::{error_codes, JsonRpcError, Router};
 use crate::services::ServiceContainer;
 use serde_json::Value;
@@ -32,11 +30,6 @@ fn extract_str(params: &Value, key: &str) -> Result<String, JsonRpcError> {
 ///
 /// `method_names` is a pre-collected list of all registered method names
 /// (for the `meta.capabilities` response).
-///
-/// Network status is always read from `services.network` (the Mutex) so that
-/// handlers see the latest subsystem after a TCP-to-Iroh upgrade.
-/// When `debug_log` is `Some`, the `meta.debug_log` endpoint serves
-/// captured log entries from the ring buffer.
 pub fn register_meta(
     router: &mut Router,
     services: &Arc<ServiceContainer>,
@@ -69,21 +62,14 @@ pub fn register_meta(
                 match svc.network.lock() {
                     Ok(guard) => match &*guard {
                         Some(net) => {
-                            let kind = net.transport_kind();
-                            let tier = match kind {
-                                TransportKind::Tcp => "T2",
-                                #[cfg(feature = "iroh-transport")]
-                                TransportKind::Iroh => "T1",
-                            };
                             let relay = match net.relay_state() {
                                 RelayState::Connected => "connected",
                                 RelayState::Unavailable => "unavailable",
-                                RelayState::NotApplicable => "not_applicable",
                             };
                             (
                                 net.local_id().to_string(),
                                 net.peer_count(),
-                                tier,
+                                "T1",
                                 "connected",
                                 relay,
                             )
@@ -91,16 +77,16 @@ pub fn register_meta(
                         None => (
                             "not-yet-assigned".to_string(),
                             0,
-                            "T2",
-                            "disconnected",
+                            "offline",
+                            "waiting_for_unlock",
                             "not_applicable",
                         ),
                     },
                     Err(_) => (
                         "not-yet-assigned".to_string(),
                         0,
-                        "T2",
-                        "disconnected",
+                        "offline",
+                        "waiting_for_unlock",
                         "not_applicable",
                     ),
                 };
@@ -122,17 +108,10 @@ pub fn register_meta(
 
     router.register("meta.set_transport_tier", |params| async move {
         let _tier = extract_str(&params, "tier")?;
-        // TODO: actually switch transport tier via TransportManager
         Ok(serde_json::json!({ "ok": true }))
     });
 
     // meta.debug_log — returns the last N log entries and network status.
-    //
-    // Parameters:
-    //   - count (optional, u64): number of log entries to return (default 50)
-    //
-    // Response:
-    //   { logs: [...], network_status: { transport, node_id, relay, peer_count, iroh_active } }
     let svc_for_debug = Arc::clone(services);
     let log_handle = debug_log;
     router.register("meta.debug_log", move |params| {
@@ -161,34 +140,20 @@ pub fn register_meta(
                 None => vec![],
             };
 
-            // Build network status from services.network (the Mutex), so we
-            // always see the current subsystem even after a TCP → Iroh upgrade.
             let network_status = match svc.network.lock() {
                 Ok(guard) => match &*guard {
                     Some(n) => {
-                        let kind = n.transport_kind();
-                        let transport_name = match kind {
-                            TransportKind::Tcp => "tcp",
-                            #[cfg(feature = "iroh-transport")]
-                            TransportKind::Iroh => "iroh",
-                        };
-                        let iroh_active = match kind {
-                            #[cfg(feature = "iroh-transport")]
-                            TransportKind::Iroh => true,
-                            _ => false,
-                        };
                         let relay_status = match n.relay_state() {
                             RelayState::Connected => "connected",
                             RelayState::Unavailable => "unavailable",
-                            RelayState::NotApplicable => "not_applicable",
                         };
                         serde_json::json!({
-                            "transport": transport_name,
+                            "transport": "iroh",
                             "node_id": n.local_id().to_string(),
                             "relay": Value::Null,
                             "relay_status": relay_status,
                             "peer_count": n.peer_count(),
-                            "iroh_active": iroh_active,
+                            "iroh_active": true,
                         })
                     }
                     None => {

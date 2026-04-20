@@ -5,13 +5,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-[features]
-default = ["iroh-transport"]
-iroh-transport = ["ephemera-transport/iroh-transport"]
-
 [dependencies]
 ephemera-types = { workspace = true }
-ephemera-transport = { path = "../ephemera-transport", default-features = false }
+ephemera-transport = { path = "../ephemera-transport" }
 tokio = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }

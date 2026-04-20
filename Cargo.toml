@@ -106,8 +106,8 @@ ephemera-post = { path = "crates/ephemera-post" }
 ephemera-social = { path = "crates/ephemera-social" }
 ephemera-media = { path = "crates/ephemera-media" }
 ephemera-protocol = { path = "crates/ephemera-protocol" }
-ephemera-transport = { path = "crates/ephemera-transport", default-features = false }
-ephemera-gossip = { path = "crates/ephemera-gossip", default-features = false }
+ephemera-transport = { path = "crates/ephemera-transport" }
+ephemera-gossip = { path = "crates/ephemera-gossip" }
 ephemera-dht = { path = "crates/ephemera-dht" }
 ephemera-message = { path = "crates/ephemera-message" }
 ephemera-abuse = { path = "crates/ephemera-abuse" }

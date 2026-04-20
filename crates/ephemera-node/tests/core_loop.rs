@@ -257,14 +257,14 @@ async fn test_identity_unlock_lock_roundtrip() {
         .to_string();
 
     // Lock the identity.
-    svc.identity.lock().await.unwrap();
+    svc.identity.lock(false).await.unwrap();
 
     // Attempting to get active should fail.
     let active_err = svc.identity.get_active().await;
     assert!(active_err.is_err(), "get_active should fail when locked");
 
     // Unlock with the correct passphrase.
-    let unlock = svc.identity.unlock("my-secret-passphrase").await.unwrap();
+    let unlock = svc.identity.unlock("my-secret-passphrase", false).await.unwrap();
     assert!(unlock["unlocked"].as_bool().unwrap());
     assert_eq!(unlock["pseudonym_count"].as_u64().unwrap(), 1);
 

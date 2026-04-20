@@ -18,10 +18,10 @@ fn test_config(dir: &std::path::Path) -> NodeConfig {
     config
 }
 
-/// Verify that `EphemeraNode::start()` binds the network listener and the
-/// `network()` accessor returns a `Some` with a non-zero port.
+/// Verify that `EphemeraNode::start()` works without an identity.
+/// Network is None until identity is unlocked (Iroh-only design).
 #[tokio::test]
-async fn test_node_starts_with_network() {
+async fn test_node_starts_without_network_when_locked() {
     let dir = tempfile::tempdir().unwrap();
     let config = test_config(dir.path());
     let mut node = EphemeraNode::new(config).unwrap();
@@ -34,20 +34,18 @@ async fn test_node_starts_with_network() {
 
     node.start().await.unwrap();
 
-    // After start, network should be Some.
-    let net = node.network().expect("network should be Some after start");
-    assert_eq!(net.peer_count(), 0, "no peers connected yet");
+    // Without identity, network remains None (no Iroh key to create endpoint).
+    assert!(
+        node.network().is_none(),
+        "network should be None when identity is locked"
+    );
 
-    // Node should be marked as running.
+    // Node should be marked as running (background tasks active).
     assert!(node.is_running(), "node should be running after start");
 
     // Shutdown should work cleanly.
     node.shutdown().await.unwrap();
     assert!(!node.is_running(), "node should not be running after shutdown");
-    assert!(
-        node.network().is_none(),
-        "network should be None after shutdown"
-    );
 }
 
 /// Verify that calling `start()` twice is idempotent (no panic, no error).
@@ -65,23 +63,22 @@ async fn test_node_start_is_idempotent() {
     node.shutdown().await.unwrap();
 }
 
-/// Verify that the gossip ingest loop is spawned. The full end-to-end test
-/// (publish -> receive -> store) is covered in tests/gossip_pipeline.rs.
-/// Here we verify that start() successfully subscribes to the public feed
-/// and spawns the ingest task without errors.
+/// Verify that gossip ingest loops are spawned when identity is unlocked.
+/// With Iroh-only design, network + gossip start after identity unlock.
 #[tokio::test]
-async fn test_gossip_ingest_spawned() {
+async fn test_gossip_ingest_spawned_after_unlock() {
     let dir = tempfile::tempdir().unwrap();
     let config = test_config(dir.path());
     let mut node = EphemeraNode::new(config).unwrap();
 
-    // start() subscribes to the public feed topic and spawns the ingest
-    // loop. If either fails, start() returns an error.
+    // Create identity first so network can start.
+    node.services().identity.create("test-pass").await.unwrap();
+
     node.start().await.unwrap();
 
-    // The node should be running with a network subsystem.
+    // With identity unlocked, network should be started.
     assert!(node.is_running());
-    assert!(node.network().is_some());
+    assert!(node.network().is_some(), "network should exist after start with unlocked identity");
 
     node.shutdown().await.unwrap();
 }
@@ -154,9 +151,7 @@ async fn test_handle_rpc_methods_registered() {
 }
 
 /// Verify that when the identity is unlocked before start(), the node
-/// creates an Iroh transport endpoint (when the `iroh-transport` feature is
-/// enabled, which is the default).
-#[cfg(feature = "iroh-transport")]
+/// creates an Iroh transport endpoint and starts networking.
 #[tokio::test]
 async fn test_node_starts_with_iroh() {
     let dir = tempfile::tempdir().unwrap();
@@ -172,16 +167,10 @@ async fn test_node_starts_with_iroh() {
 
     node.start().await.unwrap();
 
+    // With identity unlocked at boot, start() should have started the network.
     let net = node
         .network()
-        .expect("network should be Some after start");
-
-    // With identity unlocked, the transport should be Iroh.
-    assert_eq!(
-        net.transport_kind(),
-        ephemera_node::network::TransportKind::Iroh,
-        "transport should be Iroh when identity is unlocked"
-    );
+        .expect("network should be Some when identity was unlocked at start");
 
     // Peer count starts at zero (no peers connected yet).
     assert_eq!(net.peer_count(), 0);
@@ -192,10 +181,7 @@ async fn test_node_starts_with_iroh() {
 /// Verify that the Iroh NodeId matches the identity's Ed25519 public key.
 ///
 /// This is the critical property that makes "share your pubkey = share your
-/// network address" work. The Iroh endpoint derives its NodeId from the same
-/// Ed25519 secret key as the identity, so they MUST produce the same public
-/// key bytes.
-#[cfg(feature = "iroh-transport")]
+/// network address" work.
 #[tokio::test]
 async fn test_iroh_node_id_matches_identity() {
     let dir = tempfile::tempdir().unwrap();

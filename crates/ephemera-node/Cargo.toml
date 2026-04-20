@@ -5,13 +5,6 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-[features]
-default = ["iroh-transport"]
-iroh-transport = [
-    "ephemera-transport/iroh-transport",
-    "ephemera-gossip/iroh-transport",
-]
-
 [dependencies]
 ephemera-types = { workspace = true }
 ephemera-crypto = { workspace = true }
@@ -24,8 +17,8 @@ ephemera-social = { workspace = true }
 ephemera-message = { workspace = true }
 ephemera-abuse = { workspace = true }
 ephemera-mod = { workspace = true }
-ephemera-transport = { workspace = true, default-features = false }
-ephemera-gossip = { workspace = true, default-features = false }
+ephemera-transport = { workspace = true }
+ephemera-gossip = { workspace = true }
 ephemera-dht = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }

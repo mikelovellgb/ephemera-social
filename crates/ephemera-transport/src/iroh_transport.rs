@@ -103,6 +103,12 @@ impl IrohTransport {
     pub async fn new() -> Result<Self, TransportError> {
         let endpoint = Endpoint::builder(presets::N0)
             .alpns(vec![EPHEMERA_ALPN.to_vec()])
+            .clear_ip_transports()
+            .bind_addr("0.0.0.0:0")
+            .map_err(|e| TransportError::ConnectionFailed {
+                peer: "local".into(),
+                reason: format!("invalid bind address: {e}"),
+            })?
             .bind()
             .await
             .map_err(|e| TransportError::ConnectionFailed {
@@ -161,6 +167,12 @@ impl IrohTransport {
         let endpoint = Endpoint::builder(presets::N0)
             .alpns(vec![EPHEMERA_ALPN.to_vec()])
             .secret_key(secret_key)
+            .clear_ip_transports()
+            .bind_addr("0.0.0.0:0")
+            .map_err(|e| TransportError::ConnectionFailed {
+                peer: "local".into(),
+                reason: format!("invalid bind address: {e}"),
+            })?
             .bind()
             .await
             .map_err(|e| TransportError::ConnectionFailed {

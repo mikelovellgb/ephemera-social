@@ -5,11 +5,6 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-[features]
-default = ["iroh-transport"]
-iroh-transport = ["dep:iroh"]
-tcp-only = []
-
 [dependencies]
 ephemera-types = { workspace = true }
 ephemera-protocol = { path = "../ephemera-protocol" }
@@ -19,9 +14,7 @@ thiserror = { workspace = true }
 serde = { workspace = true }
 async-trait = { workspace = true }
 bytes = "1"
-
-# Optional: Iroh QUIC transport
-iroh = { workspace = true, optional = true }
+iroh = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }

@@ -21,7 +21,6 @@ pub mod startup;
 use debug_log::DebugLogHandle;
 use ephemera_config::NodeConfig;
 use ephemera_events::EventBus;
-use ephemera_types::NodeId;
 use network::NetworkSubsystem;
 use rpc_auth::RpcAuth;
 use services::ServiceContainer;
@@ -39,7 +38,7 @@ pub struct EphemeraNode {
     shutdown: tokio::sync::watch::Sender<bool>,
     running: bool,
     rpc_auth: RpcAuth,
-    /// Network subsystem (Iroh or TCP transport + gossip). Created on `start()`.
+    /// Network subsystem (Iroh QUIC + gossip). Created on identity unlock.
     network: Option<Arc<NetworkSubsystem>>,
     /// In-memory debug log ring buffer for the in-app debug console.
     debug_log: DebugLogHandle,
@@ -190,8 +189,11 @@ impl EphemeraNode {
         })
     }
 
-    /// Start the node: network listener, gossip ingest, GC, epoch rotation,
-    /// handle GC, dead drop polling, and reputation decay. Idempotent.
+    /// Start the node: background tasks (GC, epoch rotation, etc.).
+    ///
+    /// Networking is NOT started here. It starts when the identity is
+    /// unlocked via `identity.unlock`, `identity.create`, or an import
+    /// handler, which calls `ServiceContainer::start_network()`.
     pub async fn start(&mut self) -> Result<(), StartupError> {
         if self.running {
             tracing::warn!("node is already running");
@@ -200,268 +202,27 @@ impl EphemeraNode {
 
         startup::run_startup_sequence(&self.config, &self.services).await?;
 
-        // 1. Start network subsystem.
-        //
-        // When compiled with the `iroh-transport` feature (default), use Iroh
-        // QUIC with NAT traversal.  The Iroh NodeId is derived from the
-        // identity's Ed25519 secret so that sharing your public key IS sharing
-        // your network address.
-        //
-        // When the identity is locked (no secret key available), the Iroh
-        // transport fails to initialize, or the feature is disabled, fall back
-        // to plain TCP gracefully. The user is informed via relay_state.
-        #[cfg(feature = "iroh-transport")]
-        let network = {
-            match self.derive_secret_key_bytes() {
-                Some(secret_key_bytes) => {
-                    match NetworkSubsystem::new_iroh_with_key(secret_key_bytes).await {
-                        Ok(net) => {
-                            tracing::info!(
-                                node_id = %net.local_id(),
-                                relay_state = ?net.relay_state(),
-                                "network subsystem created (Iroh, deterministic key)"
-                            );
-                            Arc::new(net)
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                error = %e,
-                                "Iroh transport failed to initialize — falling \
-                                 back to TCP. NAT traversal unavailable. Users \
-                                 must connect by IP:port."
-                            );
-                            let node_id = self.derive_node_id();
-                            Arc::new(NetworkSubsystem::new(node_id))
-                        }
-                    }
-                }
-                None => {
-                    tracing::warn!(
-                        "identity locked — falling back to TCP transport \
-                         (unlock identity before start for Iroh NAT traversal)"
-                    );
-                    let node_id = self.derive_node_id();
-                    Arc::new(NetworkSubsystem::new(node_id))
-                }
-            }
-        };
-        #[cfg(not(feature = "iroh-transport"))]
-        let network = {
-            let node_id = self.derive_node_id();
-            Arc::new(NetworkSubsystem::new(node_id))
-        };
-
-        let listen_addr = self
-            .config
-            .listen_addr
-            .map(|a| a.to_string())
-            .unwrap_or_else(|| "0.0.0.0:0".to_string());
-
-        let bound_addr = network.start(&listen_addr).await.map_err(|e| {
-            StartupError::Transport {
-                reason: format!("network start failed: {e}"),
-            }
-        })?;
-        tracing::info!(%bound_addr, "network subsystem started");
-        self.network = Some(Arc::clone(&network));
-
-        // Make the network available to services (e.g. message delivery via gossip).
-        self.services.set_network(Arc::clone(&network));
-
         // Store the shutdown sender in ServiceContainer so that
-        // upgrade_network_to_iroh() can create new shutdown receivers
-        // for re-spawned ingest loops.
+        // start_network() can create shutdown receivers for ingest loops.
         self.services.set_shutdown_tx(self.shutdown.clone());
 
-        // 1b. Connect to bootstrap nodes from config
-        for addr in &self.config.bootstrap_nodes {
-            let peer_addr = ephemera_transport::PeerAddr {
-                node_id: ephemera_types::NodeId::from_bytes([0u8; 32]),
-                addresses: vec![addr.clone()],
-            };
-            match network.connect_to_peer(&peer_addr).await {
-                Ok(()) => tracing::info!(%addr, "connected to bootstrap node"),
-                Err(e) => tracing::warn!(%addr, error = %e, "failed to connect to bootstrap node"),
+        // If identity is already unlocked (e.g. auto-unlock), start
+        // networking immediately.
+        if self.derive_secret_key_bytes().is_some() {
+            match self.services.start_network().await {
+                Ok(()) => {
+                    // Copy the network ref to EphemeraNode for shutdown.
+                    if let Ok(guard) = self.services.network.lock() {
+                        self.network = guard.clone();
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to start network at boot (will retry on unlock)");
+                }
             }
+        } else {
+            tracing::info!("identity locked — network will start after unlock");
         }
-
-        // Collect ingest loop JoinHandles so they can be aborted on network
-        // upgrade (TCP -> Iroh). The new Iroh network will re-spawn them
-        // with fresh gossip subscriptions.
-        let mut ingest_handles: Vec<tokio::task::JoinHandle<()>> = Vec::with_capacity(3);
-
-        // 2. Spawn gossip ingest loop (gap 1.6)
-        {
-            let subscription =
-                network
-                    .subscribe_public_feed()
-                    .await
-                    .map_err(|e| StartupError::Transport {
-                        reason: format!("failed to subscribe to public feed: {e}"),
-                    })?;
-
-            let content_path = self.config.content_path();
-            let content_store = ephemera_store::ContentStore::open(&content_path)
-                .map_err(|e| StartupError::Storage {
-                    reason: format!("gossip ingest content store: {e}"),
-                })?;
-            let metadata_db = {
-                let db_path = self.config.metadata_db_path();
-                let db = ephemera_store::MetadataDb::open(&db_path).map_err(|e| {
-                    StartupError::Storage {
-                        reason: format!("gossip ingest db: {e}"),
-                    }
-                })?;
-                std::sync::Mutex::new(db)
-            };
-            let event_bus = self.event_bus.clone();
-            let rate_limiter =
-                std::sync::Mutex::new(ephemera_abuse::RateLimiter::new());
-            let fingerprint_store =
-                std::sync::Mutex::new(ephemera_abuse::FingerprintStore::new());
-            let content_filter =
-                std::sync::Mutex::new(ephemera_mod::ContentFilter::empty());
-            let shutdown_rx = self.shutdown.subscribe();
-
-            let h = tokio::spawn(async move {
-                gossip_ingest::gossip_ingest_loop(
-                    subscription,
-                    content_store,
-                    metadata_db,
-                    event_bus,
-                    rate_limiter,
-                    fingerprint_store,
-                    content_filter,
-                    shutdown_rx,
-                )
-                .await;
-            });
-            ingest_handles.push(h);
-            tracing::info!("spawned gossip ingest loop");
-        }
-
-        // 2b. Spawn message ingest loop (dm_delivery gossip topic)
-        {
-            let dm_topic = ephemera_gossip::GossipTopic::direct_messages();
-            let dm_subscription =
-                network
-                    .subscribe(&dm_topic)
-                    .await
-                    .map_err(|e| StartupError::Transport {
-                        reason: format!("failed to subscribe to dm_delivery: {e}"),
-                    })?;
-
-            let dm_metadata_db = {
-                let db_path = self.config.metadata_db_path();
-                let db = ephemera_store::MetadataDb::open(&db_path).map_err(|e| {
-                    StartupError::Storage {
-                        reason: format!("message ingest db: {e}"),
-                    }
-                })?;
-                std::sync::Mutex::new(db)
-            };
-            let dm_event_bus = self.event_bus.clone();
-            let dm_shutdown_rx = self.shutdown.subscribe();
-
-            // Get our pubkey if identity is unlocked.
-            let our_pubkey = self
-                .services
-                .identity
-                .get_signing_keypair()
-                .ok()
-                .map(|kp| kp.public_key());
-
-            let h = tokio::spawn(async move {
-                message_ingest::message_ingest_loop(
-                    dm_subscription,
-                    dm_metadata_db,
-                    dm_event_bus,
-                    our_pubkey,
-                    dm_shutdown_rx,
-                )
-                .await;
-            });
-            ingest_handles.push(h);
-            tracing::info!("spawned message ingest loop (dm_delivery)");
-        }
-
-        // 2c. Spawn moderation ingest loop (tombstone propagation)
-        {
-            let mod_topic = ephemera_gossip::GossipTopic::moderation();
-            let mod_subscription =
-                network
-                    .subscribe(&mod_topic)
-                    .await
-                    .map_err(|e| StartupError::Transport {
-                        reason: format!("failed to subscribe to moderation topic: {e}"),
-                    })?;
-
-            let mod_metadata_db = {
-                let db_path = self.config.metadata_db_path();
-                let db = ephemera_store::MetadataDb::open(&db_path).map_err(|e| {
-                    StartupError::Storage {
-                        reason: format!("moderation ingest db: {e}"),
-                    }
-                })?;
-                std::sync::Mutex::new(db)
-            };
-            let mod_content_store = {
-                let content_path = self.config.content_path();
-                ephemera_store::ContentStore::open(&content_path).map_err(|e| {
-                    StartupError::Storage {
-                        reason: format!("moderation ingest content store: {e}"),
-                    }
-                })?
-            };
-            let mod_shutdown_rx = self.shutdown.subscribe();
-
-            let h = tokio::spawn(async move {
-                moderation_ingest_loop(
-                    mod_subscription,
-                    mod_metadata_db,
-                    mod_content_store,
-                    mod_shutdown_rx,
-                )
-                .await;
-            });
-            ingest_handles.push(h);
-            tracing::info!("spawned moderation ingest loop (tombstones)");
-        }
-
-        // 2d. Spawn DHT query ingest loop (dht_lookup gossip topic)
-        {
-            let dht_topic = ephemera_gossip::GossipTopic::dht_lookup();
-            let dht_subscription =
-                network
-                    .subscribe(&dht_topic)
-                    .await
-                    .map_err(|e| StartupError::Transport {
-                        reason: format!("failed to subscribe to dht_lookup: {e}"),
-                    })?;
-
-            let services_for_dht = std::sync::Arc::clone(&self.services);
-            let network_for_dht = std::sync::Arc::clone(&network);
-            let pending_queries = std::sync::Arc::clone(&self.services.pending_dht_queries);
-            let our_node_id = hex::encode(network.local_id().as_bytes());
-            let dht_shutdown_rx = self.shutdown.subscribe();
-
-            let h = tokio::spawn(async move {
-                dht_query::dht_query_ingest_loop_services(
-                    dht_subscription,
-                    services_for_dht,
-                    network_for_dht,
-                    pending_queries,
-                    our_node_id,
-                    dht_shutdown_rx,
-                )
-                .await;
-            });
-            ingest_handles.push(h);
-            tracing::info!("spawned DHT query ingest loop (dht_lookup)");
-        }
-
-        // Store ingest handles so upgrade_network_to_iroh() can abort them.
-        self.services.store_ingest_handles(ingest_handles);
 
         // 3. GC background task
         {
@@ -626,19 +387,6 @@ impl EphemeraNode {
     #[must_use]
     pub fn debug_log(&self) -> &DebugLogHandle {
         &self.debug_log
-    }
-
-    /// Derive a `NodeId` from the identity (deterministic) or random bytes.
-    ///
-    /// Used as a fallback when creating a TCP-only network subsystem.
-    fn derive_node_id(&self) -> NodeId {
-        if let Ok(kp) = self.services.identity.get_signing_keypair() {
-            NodeId::from_bytes(*kp.public_key().as_bytes())
-        } else {
-            let mut bytes = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut bytes);
-            NodeId::from_bytes(bytes)
-        }
     }
 
     /// Extract the Ed25519 secret key bytes from the identity service.
