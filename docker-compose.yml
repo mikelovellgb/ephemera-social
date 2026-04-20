@@ -1,0 +1,57 @@
+services:
+  alice:
+    build: .
+    container_name: ephemera-test-alice
+    ports:
+      - "3510:3500"
+    volumes:
+      - ephemera-test-alice-data:/data
+    environment:
+      - EPHEMERA_DATA_DIR=/data
+      - EPHEMERA_HTTP_ADDR=0.0.0.0
+      - EPHEMERA_NO_BROWSER=1
+      - RUST_LOG=info
+    networks:
+      - ephemera-test-net
+    restart: unless-stopped
+
+  bob:
+    build: .
+    container_name: ephemera-test-bob
+    ports:
+      - "3511:3500"
+    volumes:
+      - ephemera-test-bob-data:/data
+    environment:
+      - EPHEMERA_DATA_DIR=/data
+      - EPHEMERA_HTTP_ADDR=0.0.0.0
+      - EPHEMERA_NO_BROWSER=1
+      - RUST_LOG=info
+    networks:
+      - ephemera-test-net
+    restart: unless-stopped
+
+  charlie:
+    build: .
+    container_name: ephemera-test-charlie
+    ports:
+      - "3512:3500"
+    volumes:
+      - ephemera-test-charlie-data:/data
+    environment:
+      - EPHEMERA_DATA_DIR=/data
+      - EPHEMERA_HTTP_ADDR=0.0.0.0
+      - EPHEMERA_NO_BROWSER=1
+      - RUST_LOG=info
+    networks:
+      - ephemera-test-net
+    restart: unless-stopped
+
+volumes:
+  ephemera-test-alice-data:
+  ephemera-test-bob-data:
+  ephemera-test-charlie-data:
+
+networks:
+  ephemera-test-net:
+    name: ephemera-test-net

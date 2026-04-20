@@ -1,0 +1,11 @@
+target/
+tmp/
+.git/
+*.md
+docs/
+scripts/
+.github/
+.vscode/
+.idea/
+Dockerfile.android
+output/
